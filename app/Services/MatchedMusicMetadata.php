@@ -16,11 +16,13 @@ class MatchedMusicMetadata
     /** @var array<string, list<string>> */
     private array $isrcs = [];
 
-    public function __construct(private MusicBrainzMatcher $matcher) {}
+    public function __construct(private MusicBrainzMatcher $matcher, private ManualMusicEntityMatcher $manualEntities) {}
 
     public function sync(Listen $listen): void
     {
         if ($listen->recording_mbid === null) {
+            $this->manualEntities->apply($listen);
+
             return;
         }
         $metadata = $listen->track_metadata;
@@ -91,5 +93,6 @@ class MatchedMusicMetadata
                 ['listen_id'],
             );
         }
+        $this->manualEntities->apply($listen);
     }
 }

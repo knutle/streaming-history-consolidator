@@ -1,11 +1,13 @@
 import { Link } from '@inertiajs/react';
 import {
     BookOpen,
+    Disc3,
     FolderGit2,
     LayoutGrid,
     Link2,
     Music2,
     Upload,
+    Users,
 } from 'lucide-react';
 import AppLogo from '@/components/app-logo';
 import { NavFooter } from '@/components/nav-footer';
@@ -21,6 +23,8 @@ import {
     SidebarMenuItem,
 } from '@/components/ui/sidebar';
 import { dashboard } from '@/routes';
+import { index as albumsIndex } from '@/routes/albums';
+import { index as artistsIndex } from '@/routes/artists';
 import { index as importsIndex } from '@/routes/imports';
 import { index as listensIndex } from '@/routes/listens';
 import { index as matchesIndex } from '@/routes/matches';
@@ -36,6 +40,16 @@ const mainNavItems: NavItem[] = [
         title: 'Listening history',
         href: listensIndex(),
         icon: Music2,
+    },
+    {
+        title: 'Artists',
+        href: artistsIndex(),
+        icon: Users,
+    },
+    {
+        title: 'Albums',
+        href: albumsIndex(),
+        icon: Disc3,
     },
     {
         title: 'Imports',

@@ -6,6 +6,68 @@ use Illuminate\Support\Facades\DB;
 
 class MusicBrainzMatcher
 {
+    /** @return array{results: list<array{mbid: string, name: string, context: ?string}>, hasMore: bool} */
+    public function searchEntity(string $type, string $prefix, int $page): array
+    {
+        if (! config('musicbrainz.enabled') || trim($prefix) === '') {
+            return ['results' => [], 'hasMore' => false];
+        }
+        $prefix = trim($prefix);
+        $db = DB::connection('musicbrainz');
+        if (config('musicbrainz.format') === 'canonical' && $db->getDriverName() === 'sqlite') {
+            $name = $type === 'artist' ? 'artist_credit_name' : 'release_name';
+            $id = $type === 'artist' ? 'artist_mbids' : 'release_mbid';
+            $query = $db->table('canonical_recordings')->where($name, '>=', $prefix)
+                ->where($name, '<', $prefix."\u{10ffff}")->where($id, '!=', '')
+                ->select("{$id} as mbid", "{$name} as name")->distinct()->orderBy($name)->orderBy($id);
+            if ($type === 'artist') {
+                $query->whereRaw('length(artist_mbids) = 36');
+            } else {
+                $query->addSelect('artist_credit_name as context')->orderBy('artist_credit_name');
+            }
+        } else {
+            $table = $type === 'artist' ? 'artist' : 'release';
+            $query = $db->table($table)->where('name', '>=', $prefix)->where('name', '<', $prefix."\u{10ffff}")
+                ->select('gid as mbid', 'name')->orderBy('name')->orderBy('gid');
+            if ($type === 'album') {
+                $query = $db->table('release')->join('artist_credit', 'artist_credit.id', '=', 'release.artist_credit')
+                    ->where('release.name', '>=', $prefix)->where('release.name', '<', $prefix."\u{10ffff}")
+                    ->select('release.gid as mbid', 'release.name', 'artist_credit.name as context')
+                    ->orderBy('release.name')->orderBy('release.gid');
+            }
+        }
+        $rows = $query->offset(($page - 1) * 30)->limit(31)->get();
+
+        return [
+            'results' => array_values($rows->take(30)->map(fn ($row) => [
+                'mbid' => (string) $row->mbid, 'name' => (string) $row->name,
+                'context' => isset($row->context) ? (string) $row->context : null,
+            ])->all()),
+            'hasMore' => $rows->count() > 30,
+        ];
+    }
+
+    /** @return array{mbid: string, name: string, source: string}|null */
+    public function entity(string $type, string $mbid, string $name): ?array
+    {
+        if (! config('musicbrainz.enabled')) {
+            return null;
+        }
+        $db = DB::connection('musicbrainz');
+        if (config('musicbrainz.format') === 'canonical' && $db->getDriverName() === 'sqlite') {
+            $id = $type === 'artist' ? 'artist_mbids' : 'release_mbid';
+            $column = $type === 'artist' ? 'artist_credit_name' : 'release_name';
+            $exists = $db->table('canonical_recordings')->where($id, $mbid)->where($column, $name)->exists();
+            $source = 'canonical_credit';
+        } else {
+            $table = $type === 'artist' ? 'artist' : 'release';
+            $exists = $db->table($table)->where('gid', $mbid)->where('name', $name)->exists();
+            $source = 'musicbrainz';
+        }
+
+        return $exists ? ['mbid' => $mbid, 'name' => $name, 'source' => $source] : null;
+    }
+
     /** @return array{results: list<array{recording_mbid: string, track_name: string, artist_name: string}>, hasMore: bool} */
     public function search(string $prefix, string $artist, int $page): array
     {

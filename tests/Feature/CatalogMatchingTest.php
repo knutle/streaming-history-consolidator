@@ -179,12 +179,162 @@ class CatalogMatchingTest extends TestCase
 
                 return $parts['host'] === 'musicbrainz.org'
                     && $parts['path'] === '/recording/create'
-                    && $query['edit-recording_name'] === 'Catalog track'
-                    && $query['edit-recording_artist_credit_names_0_name'] === 'Catalog artist'
+                    && ! isset($query['edit-recording_name'])
+                    && ! isset($query['edit-recording_artist_credit_names_0_name'])
                     && $query['edit-recording_length'] === '3:01'
                     && str_contains($query['edit-recording_edit_note'], 'https://music.apple.com/us/song/987')
-                    && str_contains($query['edit-recording_edit_note'], 'Apple catalog ISRC: USABC2412345')
+                    && str_contains($query['edit-recording_edit_note'], "Track: Catalog track\nArtist: Catalog artist\nAlbum: Catalog album\nISRC: USABC2412345")
                     && str_contains($query['edit-recording_edit_note'], 'https://open.spotify.com/track/0123456789ABCDEFGHIJKL');
+            }));
+    }
+
+    public function test_musicbrainz_editor_leaves_ambiguous_titles_and_artist_credits_for_manual_review(): void
+    {
+        config(['musicbrainz.enabled' => false]);
+        $this->actingAs(User::factory()->create());
+        $this->import('2024-01-01T12:00:00Z');
+        $listen = Listen::query()->sole();
+        $this->post(route('listens.catalog', $listen->id), [
+            ...$this->appleMatch(),
+            'catalog_track' => 'SONG (feat. Guest) - Live at Oslo',
+            'catalog_artist' => 'Artist & Guest',
+            'catalog_duration' => 181999,
+        ])->assertSessionHasNoErrors();
+
+        $this->get(route('listens.show', $listen->id))->assertOk()->assertInertia(fn (Assert $page) => $page
+            ->where('musicBrainzSeed', function ($url) {
+                parse_str(parse_url($url, PHP_URL_QUERY), $query);
+
+                return ! isset($query['edit-recording_name'])
+                    && ! isset($query['edit-recording_artist_credit_names_0_name'])
+                    && ! isset($query['edit-recording_comment'])
+                    && $query['edit-recording_length'] === '3:02'
+                    && str_contains($query['edit-recording_edit_note'], 'Track: SONG (feat. Guest) - Live at Oslo')
+                    && str_contains($query['edit-recording_edit_note'], 'Artist: Artist & Guest')
+                    && str_contains($query['edit-recording_edit_note'], 'Duration (ms): 181999')
+                    && str_contains($query['edit-recording_edit_note'], 'metadata may include user edits');
+            }));
+    }
+
+    public function test_musicbrainz_editor_prefills_name_and_preferred_artist_when_catalog_titles_match(): void
+    {
+        config(['musicbrainz.enabled' => false]);
+        $this->actingAs(User::factory()->create());
+        $this->import('2024-01-01T12:00:00Z');
+        $listen = Listen::query()->sole();
+        $this->post(route('listens.catalog', $listen->id), [
+            ...$this->appleMatch(), 'catalog_track' => 'Track',
+        ])->assertSessionHasNoErrors();
+
+        $this->get(route('listens.show', $listen->id))->assertOk()->assertInertia(fn (Assert $page) => $page
+            ->where('musicBrainzSeed', function ($url) {
+                parse_str(parse_url($url, PHP_URL_QUERY), $query);
+
+                return $query['edit-recording_name'] === 'Track'
+                    && $query['edit-recording_artist_credit_names_0_name'] === 'Catalog artist'
+                    && $query['edit-recording_artist_credit_names_0_artist_name'] === 'Catalog artist'
+                    && str_contains($query['edit-recording_edit_note'], 'Artist: Artist');
+            }));
+    }
+
+    public function test_musicbrainz_editor_prefills_from_a_single_catalog(): void
+    {
+        config(['musicbrainz.enabled' => false]);
+        $this->actingAs(User::factory()->create());
+        $this->import('2024-01-01T12:00:00Z');
+        $listen = Listen::query()->sole();
+
+        $this->get(route('listens.show', $listen->id))->assertOk()->assertInertia(fn (Assert $page) => $page
+            ->where('musicBrainzSeed', function ($url) {
+                parse_str(parse_url($url, PHP_URL_QUERY), $query);
+
+                return $query['edit-recording_name'] === 'Track'
+                    && $query['edit-recording_artist_credit_names_0_name'] === 'Artist'
+                    && $query['edit-recording_artist_credit_names_0_artist_name'] === 'Artist';
+            }));
+    }
+
+    public function test_musicbrainz_editor_uses_known_artist_when_preferred_catalog_artist_is_unknown(): void
+    {
+        config(['musicbrainz.enabled' => false]);
+        $this->actingAs(User::factory()->create());
+        $this->import('2024-01-01T12:00:00Z');
+        $listen = Listen::query()->sole();
+        $this->post(route('listens.catalog', $listen->id), [
+            ...$this->appleMatch(), 'catalog_track' => 'Track', 'catalog_artist' => 'Unknown artist',
+        ])->assertSessionHasNoErrors();
+
+        $this->get(route('listens.show', $listen->id))->assertOk()->assertInertia(fn (Assert $page) => $page
+            ->where('musicBrainzSeed', function ($url) {
+                parse_str(parse_url($url, PHP_URL_QUERY), $query);
+
+                return $query['edit-recording_name'] === 'Track'
+                    && $query['edit-recording_artist_credit_names_0_name'] === 'Artist';
+            }));
+    }
+
+    public function test_musicbrainz_editor_does_not_prefill_when_catalog_titles_differ_in_case(): void
+    {
+        config(['musicbrainz.enabled' => false]);
+        $this->actingAs(User::factory()->create());
+        $this->import('2024-01-01T12:00:00Z');
+        $listen = Listen::query()->sole();
+        $this->post(route('listens.catalog', $listen->id), [
+            ...$this->appleMatch(), 'catalog_track' => 'track',
+        ])->assertSessionHasNoErrors();
+
+        $this->get(route('listens.show', $listen->id))->assertOk()->assertInertia(fn (Assert $page) => $page
+            ->where('musicBrainzSeed', function ($url) {
+                parse_str(parse_url($url, PHP_URL_QUERY), $query);
+
+                return ! isset($query['edit-recording_name'])
+                    && ! isset($query['edit-recording_artist_credit_names_0_name']);
+            }));
+    }
+
+    public function test_musicbrainz_editor_does_not_prefill_a_blank_catalog_title(): void
+    {
+        config(['musicbrainz.enabled' => false]);
+        $this->actingAs(User::factory()->create());
+        $this->import('2024-01-01T12:00:00Z');
+        $listen = Listen::query()->sole();
+        $metadata = $listen->track_metadata;
+        $metadata['additional_info']['catalogs']['spotify']['id'] = 'ABCDEFGHIJKLMNOPQRSTUV';
+        $metadata['additional_info']['catalogs']['spotify']['track_name'] = ' ';
+        $listen->update(['track_metadata' => $metadata]);
+
+        $this->get(route('listens.show', $listen->id))->assertOk()->assertInertia(fn (Assert $page) => $page
+            ->where('musicBrainzSeed', function ($url) {
+                parse_str(parse_url($url, PHP_URL_QUERY), $query);
+
+                return ! isset($query['edit-recording_name'])
+                    && ! isset($query['edit-recording_artist_credit_names_0_name']);
+            }));
+    }
+
+    public function test_musicbrainz_editor_omits_unknown_artist_and_unrepresentable_short_duration(): void
+    {
+        config(['musicbrainz.enabled' => false]);
+        $this->actingAs(User::factory()->create());
+        $this->import('2024-01-01T12:00:00Z');
+        $listen = Listen::query()->sole();
+        $metadata = $listen->track_metadata;
+        $metadata['additional_info']['catalogs']['spotify'] = [
+            'provider' => 'spotify', 'id' => 'ABCDEFGHIJKLMNOPQRSTUV',
+            'track_name' => 'Track', 'artist_name' => 'Unknown artist',
+            'release_name' => null, 'duration_ms' => 499, 'origin' => 'import', 'isrc' => null,
+        ];
+        $listen->update(['track_metadata' => $metadata]);
+
+        $this->get(route('listens.show', $listen->id))->assertOk()->assertInertia(fn (Assert $page) => $page
+            ->where('musicBrainzSeed', function ($url) {
+                parse_str(parse_url($url, PHP_URL_QUERY), $query);
+
+                return $query['edit-recording_name'] === 'Track'
+                    && ! isset($query['edit-recording_length'])
+                    && ! isset($query['edit-recording_artist_credit_names_0_name'])
+                    && ! str_contains($query['edit-recording_edit_note'], 'Artist: Unknown artist')
+                    && str_contains($query['edit-recording_edit_note'], 'https://open.spotify.com/track/ABCDEFGHIJKLMNOPQRSTUV');
             }));
     }
 

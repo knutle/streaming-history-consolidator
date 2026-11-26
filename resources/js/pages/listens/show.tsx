@@ -796,11 +796,29 @@ export default function ListenDetails({
                                     target="_blank"
                                     rel="noreferrer"
                                 >
-                                    Open a prefilled recording editor
+                                    Open a recording editor with sources
                                 </a>
-                                . Review the metadata and submit using your
-                                MusicBrainz account. Source links are included
-                                in the edit note for verification.
+                                . The edit note includes stored catalog metadata
+                                and links for verification. Check that the
+                                sources describe the same recording. When
+                                catalog titles agree, the title and a catalog
+                                artist are prefilled. Check the title, select
+                                the correct individual artists and edit the
+                                credits according to{' '}
+                                <a
+                                    className="underline"
+                                    href="https://musicbrainz.org/doc/Style"
+                                    target="_blank"
+                                    rel="noreferrer"
+                                >
+                                    MusicBrainz style
+                                </a>
+                                : review capitalization, featured artists,
+                                versions and live details. Search for an
+                                existing recording or release first; create a
+                                standalone recording only when appropriate.
+                                Review the duration and edit note, and submit
+                                using your MusicBrainz account.
                             </p>
                         )}
                         {!musicbrainzEnabled ? (

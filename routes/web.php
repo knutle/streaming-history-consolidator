@@ -23,6 +23,12 @@ Route::middleware(['auth', 'verified'])->group(function () {
     Route::get('matches/recording/{match}/edit', [ManualMatchController::class, 'edit'])->name('matches.edit');
     Route::put('matches/recording/{match}', [ManualMatchController::class, 'update'])->name('matches.update');
     Route::delete('matches/{type}/{match}', [ManualMatchController::class, 'destroy'])->name('matches.destroy');
+    Route::get('artists', [MusicEntityController::class, 'artists'])->name('artists.index');
+    Route::get('albums', [MusicEntityController::class, 'albums'])->name('albums.index');
+    Route::get('music-entities/{type}/{listen}', [MusicEntityController::class, 'manage'])->name('music-entities.manage');
+    Route::post('music-entities/{type}/{listen}/musicbrainz', [MusicEntityController::class, 'matchMusicBrainz'])->name('music-entities.musicbrainz');
+    Route::post('music-entities/{type}/{listen}/catalog', [MusicEntityController::class, 'matchCatalog'])->name('music-entities.catalog');
+    Route::delete('music-entities/{type}/{listen}/{kind}', [MusicEntityController::class, 'removeMatch'])->name('music-entities.remove');
     Route::get('artists/{mbid}', [MusicEntityController::class, 'artist'])->name('artists.show');
     Route::get('albums/{mbid}', [MusicEntityController::class, 'album'])->name('albums.show');
 });

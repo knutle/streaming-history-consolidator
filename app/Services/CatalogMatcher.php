@@ -127,6 +127,33 @@ class CatalogMatcher
         return null;
     }
 
+    public function entityIdentifier(string $type, string $provider, string $value): ?string
+    {
+        $value = trim($value);
+        if ($provider === 'spotify' && preg_match('/^spotify:'.preg_quote($type, '/').':([a-zA-Z0-9]{22})$/D', $value, $match)) {
+            return $match[1];
+        }
+        $url = parse_url($value);
+        if ($url === false || ($url['scheme'] ?? '') !== 'https' || isset($url['user']) || isset($url['pass']) || isset($url['port'])) {
+            return null;
+        }
+        $host = strtolower($url['host'] ?? '');
+        $path = $url['path'] ?? '';
+        if ($provider === 'spotify' && $host === 'open.spotify.com'
+            && preg_match('~^/(?:intl-[a-z]{2}/)?'.preg_quote($type, '~').'/([a-zA-Z0-9]{22})/?$~D', $path, $match)) {
+            return $match[1];
+        }
+        if ($provider === 'apple' && $host === 'music.apple.com'
+            && preg_match('~^/(?:[a-z]{2}/)?'.preg_quote($type, '~').'/(?:[^/]+/)?([1-9][0-9]{0,19})/?$~Di', $path, $match)) {
+            parse_str($url['query'] ?? '', $query);
+            if ($type !== 'album' || ! array_key_exists('i', $query)) {
+                return $match[1];
+            }
+        }
+
+        return null;
+    }
+
     public function url(string $provider, string $id): string
     {
         return $provider === 'spotify' ? 'https://open.spotify.com/track/'.$id : 'https://music.apple.com/us/song/'.$id;
@@ -242,24 +269,52 @@ class CatalogMatcher
         if (! is_array($match)) {
             return null;
         }
-        $params = [
-            'edit-recording.name' => $match['track_name'],
-            'edit-recording.artist_credit.names.0.name' => $match['artist_name'],
-        ];
+        $params = [];
+        $title = $match['track_name'] ?? null;
+        $titlesAgree = is_string($title) && trim($title) !== '';
+        foreach ($catalogs as $catalog) {
+            if (($catalog['track_name'] ?? null) !== $title) {
+                $titlesAgree = false;
+                break;
+            }
+        }
+        if ($titlesAgree) {
+            $params['edit-recording.name'] = $title;
+            foreach ([$match, ...array_values($catalogs)] as $catalog) {
+                $artist = $catalog['artist_name'] ?? null;
+                if (is_string($artist) && trim($artist) !== '' && $artist !== 'Unknown artist') {
+                    $params['edit-recording.artist_credit.names.0.name'] = $artist;
+                    $params['edit-recording.artist_credit.names.0.artist.name'] = $artist;
+                    break;
+                }
+            }
+        }
         if (is_int($match['duration_ms'] ?? null) && $match['duration_ms'] > 0) {
-            $seconds = intdiv($match['duration_ms'], 1000);
-            $params['edit-recording.length'] = sprintf('%d:%02d', intdiv($seconds, 60), $seconds % 60);
+            $seconds = intdiv($match['duration_ms'], 1000) + ($match['duration_ms'] % 1000 >= 500 ? 1 : 0);
+            if ($seconds > 0) {
+                $params['edit-recording.length'] = sprintf('%d:%02d', intdiv($seconds, 60), $seconds % 60);
+            }
         }
         $sources = [];
         foreach (['apple', 'spotify'] as $provider) {
             if (isset($catalogs[$provider]['id']) && is_string($catalogs[$provider]['id'])) {
-                $sources[] = $this->url($provider, $catalogs[$provider]['id']);
-                if (is_string($catalogs[$provider]['isrc'] ?? null)) {
-                    $sources[] = ucfirst($provider).' catalog ISRC: '.$catalogs[$provider]['isrc'];
+                $catalog = $catalogs[$provider];
+                $name = $provider === 'apple' ? 'Apple Music' : 'Spotify';
+                $source = [$name.': '.$this->url($provider, $catalog['id'])];
+                foreach (['track_name' => 'Track', 'artist_name' => 'Artist', 'release_name' => 'Album', 'isrc' => 'ISRC'] as $field => $label) {
+                    if (is_string($catalog[$field] ?? null) && trim($catalog[$field]) !== ''
+                        && ! ($field === 'artist_name' && $catalog[$field] === 'Unknown artist')) {
+                        $source[] = $label.': '.$catalog[$field];
+                    }
                 }
+                if (is_int($catalog['duration_ms'] ?? null) && $catalog['duration_ms'] > 0) {
+                    $source[] = 'Duration (ms): '.$catalog['duration_ms'];
+                }
+                $sources[] = implode("\n", $source);
             }
         }
-        $params['edit-recording.edit_note'] = "Sources to review:\n".implode("\n", $sources);
+        $params['edit-recording.edit_note'] = "Catalog matches to verify (metadata may include user edits; confirm each source refers to this recording):\n\n"
+            .implode("\n\n", $sources);
 
         return 'https://musicbrainz.org/recording/create?'.http_build_query($params, '', '&', PHP_QUERY_RFC3986);
     }
