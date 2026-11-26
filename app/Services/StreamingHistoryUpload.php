@@ -23,19 +23,22 @@ class StreamingHistoryUpload
     ) {}
 
     /** @param list<UploadedFile> $files
+     * @param  (\Closure(array{file: string, current: int, total: int, processed: int}): void)|null  $progress
+     * @param  (\Closure(): void)|null  $checkAbort
      * @return array{imported: int, duplicates: int, matched: int, errors: list<array{file: string, message: string}>}
      */
-    public function import(User $user, array $files): array
+    public function import(User $user, array $files, ?\Closure $progress = null, ?\Closure $checkAbort = null): array
     {
         $result = ['imported' => 0, 'duplicates' => 0, 'matched' => 0, 'errors' => []];
         $inputs = [];
         $temporaries = [];
         $extracted = 0;
         foreach ($files as $file) {
+            $checkAbort?->__invoke();
             $name = $file->getClientOriginalName();
             try {
                 if (strtolower($file->getClientOriginalExtension()) === 'zip') {
-                    $this->unpack($file->getRealPath(), $name, $inputs, $temporaries, $extracted, $result['errors']);
+                    $this->unpack($file->getRealPath(), $name, $inputs, $temporaries, $extracted, $result['errors'], $checkAbort);
                 } else {
                     $inputs[] = ['name' => $name, 'path' => $file->getRealPath()];
                 }
@@ -49,6 +52,7 @@ class StreamingHistoryUpload
         $presence = [];
         $hasMetadata = false;
         foreach ($inputs as $input) {
+            $checkAbort?->__invoke();
             try {
                 $type = $input['type'] ?? $this->detect($input['path'], $input['name']);
                 if ($type === 'library' || $type === 'playlist') {
@@ -62,9 +66,16 @@ class StreamingHistoryUpload
             }
         }
 
-        foreach ($history as $input) {
+        foreach ($history as $index => $input) {
+            $checkAbort?->__invoke();
             try {
-                $counts = $this->importer->import($user, $input['type'], $input['path'], $metadata, $presence);
+                $update = function (int $processed) use ($progress, $input, $index, $history): void {
+                    if ($progress !== null) {
+                        $progress(['file' => $input['name'], 'current' => $index + 1, 'total' => count($history), 'processed' => $processed]);
+                    }
+                };
+                $update(0);
+                $counts = $this->importer->import($user, $input['type'], $input['path'], $metadata, $presence, $update, $checkAbort);
                 foreach ($counts as $key => $count) {
                     $result[$key] += $count;
                 }
@@ -75,6 +86,8 @@ class StreamingHistoryUpload
         if ($history === [] && ($hasMetadata || $result['errors'] === [])) {
             $result['errors'][] = ['file' => 'Upload', 'message' => 'No supported listening history was found. Metadata files must be uploaded with history.'];
         }
+
+        $checkAbort?->__invoke();
 
         return $result;
     }
@@ -91,8 +104,9 @@ class StreamingHistoryUpload
      * @param  list<array{name: string, path: string, type?: string}>  $inputs
      * @param  list<resource>  $temporaries
      * @param  list<array{file: string, message: string}>  $errors
+     * @param  (\Closure(): void)|null  $checkAbort
      */
-    private function unpack(string $path, string $name, array &$inputs, array &$temporaries, int &$extracted, array &$errors): void
+    private function unpack(string $path, string $name, array &$inputs, array &$temporaries, int &$extracted, array &$errors, ?\Closure $checkAbort): void
     {
         if (! class_exists(ZipArchive::class)) {
             $this->invalid('ZIP imports require the PHP zip extension.');
@@ -117,6 +131,7 @@ class StreamingHistoryUpload
             $found = false;
             $initialErrors = count($errors);
             for ($i = 0; $i < $zip->numFiles; $i++) {
+                $checkAbort?->__invoke();
                 $entry = $zip->getNameIndex($i);
                 if ($entry === false || str_ends_with($entry, '/')) {
                     continue;

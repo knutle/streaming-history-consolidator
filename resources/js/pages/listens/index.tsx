@@ -6,7 +6,7 @@ import { Label } from '@/components/ui/label';
 import { show as albumShow } from '@/routes/albums';
 import { show as artistShow } from '@/routes/artists';
 import { index, show } from '@/routes/listens';
-import { edit as profileEdit } from '@/routes/profile';
+import { index as importsIndex } from '@/routes/imports';
 
 type Listen = {
     id: number;
@@ -54,8 +54,8 @@ export default function ListeningHistory({ listens, filters }: Props) {
                     </h1>
                     <p className="text-sm text-muted-foreground">
                         Browse your Spotify and Apple Music history.{' '}
-                        <Link href={profileEdit()} className="underline">
-                            Import history in profile settings.
+                        <Link href={importsIndex()} className="underline">
+                            Import history.
                         </Link>
                         {' · '}
                         <Link

@@ -1,5 +1,12 @@
 import { Link } from '@inertiajs/react';
-import { BookOpen, FolderGit2, LayoutGrid, Music2 } from 'lucide-react';
+import {
+    BookOpen,
+    FolderGit2,
+    LayoutGrid,
+    Link2,
+    Music2,
+    Upload,
+} from 'lucide-react';
 import AppLogo from '@/components/app-logo';
 import { NavFooter } from '@/components/nav-footer';
 import { NavMain } from '@/components/nav-main';
@@ -14,7 +21,9 @@ import {
     SidebarMenuItem,
 } from '@/components/ui/sidebar';
 import { dashboard } from '@/routes';
+import { index as importsIndex } from '@/routes/imports';
 import { index as listensIndex } from '@/routes/listens';
+import { index as matchesIndex } from '@/routes/matches';
 import type { NavItem } from '@/types';
 
 const mainNavItems: NavItem[] = [
@@ -27,6 +36,16 @@ const mainNavItems: NavItem[] = [
         title: 'Listening history',
         href: listensIndex(),
         icon: Music2,
+    },
+    {
+        title: 'Imports',
+        href: importsIndex(),
+        icon: Upload,
+    },
+    {
+        title: 'Manual matches',
+        href: matchesIndex(),
+        icon: Link2,
     },
 ];
 

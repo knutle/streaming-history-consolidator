@@ -2,8 +2,11 @@
 
 namespace Tests\Feature\Settings;
 
+use App\Models\ImportRun;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
 use Tests\TestCase;
 
 class ProfileUpdateTest extends TestCase
@@ -137,6 +140,30 @@ class ProfileUpdateTest extends TestCase
             ->assertSessionHasErrors('password')
             ->assertRedirect(route('profile.edit'));
 
+        $this->assertNotNull($user->fresh());
+    }
+
+    public function test_deleting_account_removes_retained_import_files()
+    {
+        Storage::fake('local');
+        $user = User::factory()->create();
+        $id = (string) Str::uuid7();
+        Storage::disk('local')->put('imports/'.$id.'/0', 'private export');
+        ImportRun::query()->create(['id' => $id, 'user_id' => $user->id, 'status' => 'completed', 'files' => [['name' => 'history.json', 'path' => 'imports/'.$id.'/0']]]);
+
+        $this->actingAs($user)->delete(route('profile.destroy'), ['password' => 'password'])->assertRedirect(route('home'));
+
+        Storage::disk('local')->assertMissing('imports/'.$id.'/0');
+        $this->assertDatabaseMissing('import_runs', ['id' => $id]);
+    }
+
+    public function test_account_cannot_be_deleted_while_an_import_is_active()
+    {
+        $user = User::factory()->create();
+        ImportRun::query()->create(['id' => (string) Str::uuid7(), 'user_id' => $user->id, 'status' => 'running', 'files' => []]);
+
+        $this->actingAs($user)->delete(route('profile.destroy'), ['password' => 'password'])
+            ->assertSessionHasErrors(['password' => 'Stop active imports before deleting your account.']);
         $this->assertNotNull($user->fresh());
     }
 }

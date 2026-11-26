@@ -109,6 +109,27 @@ class CatalogMatchingTest extends TestCase
         $this->assertDatabaseCount('catalog_matches', 0);
     }
 
+    public function test_saved_catalog_choices_can_be_reviewed_and_removed_without_altering_existing_listens(): void
+    {
+        config(['musicbrainz.enabled' => false]);
+        $user = User::factory()->create();
+        $this->actingAs($user);
+        $this->import('2024-01-01T12:00:00Z');
+        $listen = Listen::query()->sole();
+        $this->post(route('listens.catalog', $listen->id), $this->appleMatch())->assertSessionHasNoErrors();
+        $id = DB::table('catalog_matches')->value('id');
+        $this->get(route('matches.index'))->assertOk()->assertInertia(fn (Assert $page) => $page
+            ->has('catalogs.data', 1)->where('catalogs.data.0.source_track', 'Track')
+            ->where('catalogs.data.0.match.track_name', 'Catalog track'));
+        $this->actingAs(User::factory()->create())
+            ->delete(route('matches.destroy', ['type' => 'catalog', 'match' => $id]))->assertNotFound();
+        $this->actingAs($user)->delete(route('matches.destroy', ['type' => 'catalog', 'match' => $id]))
+            ->assertRedirect(route('matches.index'));
+        $this->assertSame('987', $listen->fresh()->track_metadata['additional_info']['catalogs']['apple']['id']);
+        $this->import('2024-01-02T12:00:00Z');
+        $this->assertArrayNotHasKey('apple', Listen::query()->latest('id')->firstOrFail()->track_metadata['additional_info']['catalogs']);
+    }
+
     public function test_incomplete_song_identity_does_not_propagate_manual_matches(): void
     {
         config(['musicbrainz.enabled' => false]);

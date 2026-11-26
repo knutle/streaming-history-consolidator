@@ -1,24 +1,36 @@
-import { Head } from '@inertiajs/react';
+import { Head, Link } from '@inertiajs/react';
 import DeleteListeningHistory from '@/components/delete-listening-history';
-import ImportHistory from '@/components/import-history';
+import { ImportSummary, type ImportResult } from '@/components/import-history';
+import ManageImports from '@/components/manage-imports';
+import { index as importsIndex } from '@/routes/imports';
 import { create } from '@/routes/listens';
 
-type Props = {
-    musicbrainzEnabled: boolean;
-    importResult: {
-        imported: number;
-        duplicates: number;
-        matched: number;
-    } | null;
-    canImport: boolean;
-};
-
-export default function ImportHistoryPage(props: Props) {
+export default function ImportHistoryPage({
+    importResult,
+    cancelRequested,
+    cancelUnavailable,
+    deletedImports,
+}: {
+    importResult: ImportResult | null;
+    cancelRequested: number | null;
+    cancelUnavailable: number;
+    deletedImports: number | null;
+}) {
     return (
         <>
             <Head title="Import history" />
             <h1 className="sr-only">Import history</h1>
-            <ImportHistory {...props} />
+            <p className="text-sm">
+                <Link className="underline" href={importsIndex()}>
+                    Upload files and track imports
+                </Link>
+            </p>
+            {importResult && <ImportSummary result={importResult} />}
+            <ManageImports
+                cancelRequested={cancelRequested}
+                cancelUnavailable={cancelUnavailable}
+                deletedImports={deletedImports}
+            />
             <DeleteListeningHistory />
         </>
     );

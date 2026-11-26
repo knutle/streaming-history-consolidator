@@ -29,9 +29,9 @@ class ManualListenMatcher
     }
 
     /** @param array{recording_mbid: string, artist_name: string, artist_mbids: list<string>, release_mbid: null} $match */
-    public function remember(User $user, Listen $listen, array $match): int
+    public function remember(User $user, Listen $listen, array $match, ?string $recordingName = null): int
     {
-        return DB::transaction(function () use ($user, $listen, $match) {
+        return DB::transaction(function () use ($user, $listen, $match, $recordingName) {
             DB::table('users')->where('id', $user->id)->lockForUpdate()->first();
             if (! Listen::query()->where('user_id', $user->id)->whereKey($listen->id)->whereNull('recording_mbid')->exists()) {
                 throw ValidationException::withMessages(['recording_mbid' => 'This listen has already been identified or deleted.']);
@@ -39,7 +39,11 @@ class ManualListenMatcher
             $key = $this->key($listen->track_name, $listen->artist_name);
             DB::table('listen_matches')->updateOrInsert(
                 ['user_id' => $user->id, 'song_key' => $key],
-                ['match' => json_encode($match, JSON_THROW_ON_ERROR), 'updated_at' => now(), 'created_at' => now()],
+                ['match' => json_encode($match + [
+                    'source_track' => $listen->track_name,
+                    'source_artist' => $listen->artist_name,
+                    'recording_name' => $recordingName,
+                ], JSON_THROW_ON_ERROR), 'updated_at' => now(), 'created_at' => now()],
             );
 
             $updated = 0;

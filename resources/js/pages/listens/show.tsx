@@ -47,6 +47,15 @@ type Listen = {
                 repeat?: string;
                 start_position_ms?: number;
                 end_position_ms?: number;
+                container_name?: string;
+                container_type?: string;
+                container_album_name?: string;
+                container_artist_name?: string;
+                container_id?: string;
+                container_global_playlist_id?: string;
+                container_playlist_id?: string;
+                source_radio_name?: string;
+                source_radio_type?: string;
             };
         };
     };
@@ -135,6 +144,18 @@ export default function ListenDetails({
         { label: 'Disc number', value: apple?.disc_number },
         { label: 'End reason', value: apple?.end_reason },
         { label: 'Source type', value: apple?.source_type },
+        { label: 'Playback container', value: apple?.container_name },
+        { label: 'Container type', value: apple?.container_type },
+        { label: 'Container album', value: apple?.container_album_name },
+        { label: 'Container artist', value: apple?.container_artist_name },
+        { label: 'Container ID', value: apple?.container_id },
+        {
+            label: 'Global playlist ID',
+            value: apple?.container_global_playlist_id,
+        },
+        { label: 'Playlist ID', value: apple?.container_playlist_id },
+        { label: 'Radio station', value: apple?.source_radio_name },
+        { label: 'Radio type', value: apple?.source_radio_type },
         { label: 'Offline', value: apple?.offline },
         { label: 'Shuffle', value: apple?.shuffle },
         { label: 'Repeat', value: apple?.repeat },

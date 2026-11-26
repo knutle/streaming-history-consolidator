@@ -2,8 +2,10 @@
 
 namespace Tests\Feature;
 
+use App\Exceptions\ImportAborted;
 use App\Models\Listen;
 use App\Models\User;
+use App\Services\AppleMusicArchiveReader;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\DB;
@@ -81,6 +83,20 @@ class AppleMusicArchiveImportTest extends TestCase
         return UploadedFile::fake()->createWithContent('export.zip', $this->zip(['Apple_Media_Services.zip' => $mediaZip]));
     }
 
+    public function test_apple_archive_preparation_can_be_aborted_before_playback_is_read(): void
+    {
+        $row = json_decode($this->library(), true, 512, JSON_THROW_ON_ERROR)[0];
+        $file = $this->export($this->dailyCsv(), json_encode(array_fill(0, 100, $row), JSON_THROW_ON_ERROR));
+        $checks = 0;
+        $this->expectException(ImportAborted::class);
+
+        iterator_to_array(app(AppleMusicArchiveReader::class)->read($file->getRealPath(), function () use (&$checks): void {
+            if (++$checks === 4) {
+                throw new ImportAborted;
+            }
+        }));
+    }
+
     public function test_nested_apple_export_enriches_existing_listens_without_creating_duplicates(): void
     {
         $this->actingAs(User::factory()->create())->post(route('listens.import'), [
@@ -116,6 +132,36 @@ class AppleMusicArchiveImportTest extends TestCase
             'source' => 'apple_zip', 'file' => $this->export($this->dailyCsv(), $this->library()),
         ])->assertSessionHas('import_result', ['imported' => 0, 'duplicates' => 1, 'matched' => 0]);
         $this->assertDatabaseCount('listens', 1);
+    }
+
+    public function test_playback_containers_are_imported_from_csv_and_enrich_existing_listens_from_zip(): void
+    {
+        $csv = $this->playCsv();
+        $withContainer = str_replace(
+            ['Client IP Address', 'private-ip'],
+            ['Container Name,Container Type,Container Playlist ID,Container Library ID,Client IP Address', 'My playlist,PLAYLIST,playlist-123,private-library,private-ip'],
+            $csv,
+        );
+        $this->actingAs(User::factory()->create())->post(route('listens.import'), [
+            'source' => 'apple', 'file' => UploadedFile::fake()->createWithContent('play.csv', $csv),
+        ])->assertSessionHasNoErrors();
+        $archive = $this->zip(['Apple Music Play Activity.csv' => $withContainer]);
+        $this->post(route('listens.import'), [
+            'source' => 'apple_zip', 'file' => UploadedFile::fake()->createWithContent('export.zip', $archive),
+        ])->assertSessionHas('import_result', ['imported' => 0, 'duplicates' => 1, 'matched' => 0]);
+        $listen = Listen::query()->sole();
+        $this->get(route('listens.show', $listen->id))->assertOk()->assertInertia(fn (Assert $page) => $page
+            ->where('listen.track_metadata.additional_info.apple_music.container_name', 'My playlist')
+            ->where('listen.track_metadata.additional_info.apple_music.container_type', 'PLAYLIST')
+            ->where('listen.track_metadata.additional_info.apple_music.container_playlist_id', 'playlist-123'));
+        $this->assertStringNotContainsString('private-library', json_encode($listen->track_metadata, JSON_THROW_ON_ERROR));
+        $this->assertStringNotContainsString('private-ip', json_encode($listen->track_metadata, JSON_THROW_ON_ERROR));
+
+        $newCsv = str_replace(['2024-01-01T12:00:00Z', 'event-1'], ['2024-01-02T12:00:00Z', 'event-2'], $withContainer);
+        $this->post(route('listens.import'), [
+            'source' => 'apple', 'file' => UploadedFile::fake()->createWithContent('play.csv', $newCsv),
+        ])->assertSessionHasNoErrors();
+        $this->assertSame('My playlist', Listen::query()->latest('id')->firstOrFail()->track_metadata['additional_info']['apple_music']['container_name']);
     }
 
     public function test_daily_catalog_conflict_does_not_attach_unconfirmed_library_metadata(): void

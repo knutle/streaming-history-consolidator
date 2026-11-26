@@ -24,20 +24,27 @@ class StreamingHistoryImporter
     /**
      * @param  array<string, string|null>  $spotifyMetadata
      * @param  array<string, array<string, bool>>  $spotifyPresence
+     * @param  (\Closure(int): void)|null  $progress
+     * @param  (\Closure(): void)|null  $checkAbort
      * @return array{imported: int, duplicates: int, matched: int}
      */
-    public function import(User $user, string $source, string $path, array $spotifyMetadata = [], array $spotifyPresence = []): array
+    public function import(User $user, string $source, string $path, array $spotifyMetadata = [], array $spotifyPresence = [], ?\Closure $progress = null, ?\Closure $checkAbort = null): array
     {
         $archive = $source === 'apple_zip';
         $source = $archive ? 'apple' : $source;
 
-        return DB::transaction(function () use ($user, $source, $path, $archive, $spotifyMetadata, $spotifyPresence) {
+        return DB::transaction(function () use ($user, $source, $path, $archive, $spotifyMetadata, $spotifyPresence, $progress, $checkAbort) {
             DB::table('users')->where('id', $user->id)->lockForUpdate()->first();
             $counts = ['imported' => 0, 'duplicates' => 0, 'matched' => 0];
             $matches = [];
+            $processed = 0;
 
-            $entries = $this->entries($path, $source, $archive);
+            $entries = $this->entries($path, $source, $archive, $checkAbort);
             foreach ($entries as $entry) {
+                if ($progress !== null && $processed > 0 && $processed % 100 === 0) {
+                    $progress($processed);
+                }
+                $processed++;
                 if ($source === 'spotify' && $entry['uri'] === '') {
                     $key = StreamingHistoryUpload::spotifyKey($entry['track'], $entry['artist'], $entry['album']);
                     $entry['identity_uri'] = $entry['uri'];
@@ -49,7 +56,7 @@ class StreamingHistoryImporter
                         $entry['spotify'] = ($entry['spotify'] ?? []) + $spotifyPresence[$id];
                     }
                 }
-                $appleMusic = $entry['apple_music'] ?? null;
+                $appleMusic = $entry['apple_music'] ?? ($source === 'apple' ? ($entry['apple_event'] ?? null) : null);
                 if ($archive && $appleMusic === null) {
                     throw new \LogicException('The Apple archive reader returned an invalid entry.');
                 }
@@ -108,7 +115,7 @@ class StreamingHistoryImporter
                 if ($entry['duration_ms'] !== null && $entry['duration_ms'] > 0) {
                     $additionalInfo['duration_ms'] = $entry['duration_ms'];
                 }
-                if ($archive && $appleMusic !== []) {
+                if ($appleMusic !== null && $appleMusic !== []) {
                     $additionalInfo['apple_music'] = $appleMusic;
                 }
                 if (($entry['spotify'] ?? []) !== []) {
@@ -156,6 +163,9 @@ class StreamingHistoryImporter
                 }
             }
 
+            if ($progress !== null && $processed > 0) {
+                $progress($processed);
+            }
             DB::table('import_batches')->insert([
                 'user_id' => $user->id,
                 'source' => $source,
@@ -169,12 +179,12 @@ class StreamingHistoryImporter
     }
 
     /**
-     * @return Generator<int, array{timestamp: string, track: string, artist: string, identity_artist?: string, album: string, played_ms: int, duration_ms: ?int, uri: string, start_time: bool, isrc: ?string, apple_music?: array<string, mixed>, spotify?: array<string, string|bool>}>
+     * @return Generator<int, array{timestamp: string, track: string, artist: string, identity_artist?: string, album: string, played_ms: int, duration_ms: ?int, uri: string, start_time: bool, isrc: ?string, apple_event?: array<string, mixed>, apple_music?: array<string, mixed>, spotify?: array<string, string|bool>}>
      */
-    private function entries(string $path, string $source, bool $archive): Generator
+    private function entries(string $path, string $source, bool $archive, ?\Closure $checkAbort): Generator
     {
         if ($archive) {
-            yield from $this->archiveReader->read($path);
+            yield from $this->archiveReader->read($path, $checkAbort);
         } else {
             yield from $this->reader->read($path, $source);
         }

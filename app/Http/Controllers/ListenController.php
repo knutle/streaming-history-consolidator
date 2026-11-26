@@ -28,6 +28,9 @@ class ListenController extends Controller
             'musicbrainzEnabled' => (bool) config('musicbrainz.enabled'),
             'importResult' => $request->session()->get('import_result'),
             'canImport' => ! ($request->user() instanceof MustVerifyEmail) || $request->user()->hasVerifiedEmail(),
+            'cancelRequested' => $request->query->has('cancel_requested') ? max(0, $request->integer('cancel_requested')) : null,
+            'cancelUnavailable' => max(0, $request->integer('cancel_unavailable')),
+            'deletedImports' => $request->query->has('deleted_imports') ? max(0, $request->integer('deleted_imports')) : null,
         ]);
     }
 
@@ -195,7 +198,7 @@ class ListenController extends Controller
             throw ValidationException::withMessages(['recording_mbid' => 'The selected recording is unavailable in the local MusicBrainz database.']);
         }
 
-        $count = $manualMatcher->remember($request->user(), $item, $match);
+        $count = $manualMatcher->remember($request->user(), $item, $match, $values['track_name']);
 
         return to_route('listens.show', $item->id)->with('match_result', $count);
     }
@@ -204,6 +207,9 @@ class ListenController extends Controller
     {
         DB::transaction(function () use ($request) {
             DB::table('users')->where('id', $request->user()->id)->lockForUpdate()->first();
+            if (DB::table('import_runs')->where('user_id', $request->user()->id)->whereIn('status', ['queued', 'running'])->exists()) {
+                throw ValidationException::withMessages(['history' => 'Wait for your active imports to finish before deleting listening history.']);
+            }
             Listen::query()->where('user_id', $request->user()->id)->delete();
             DB::table('import_batches')->where('user_id', $request->user()->id)->delete();
         });

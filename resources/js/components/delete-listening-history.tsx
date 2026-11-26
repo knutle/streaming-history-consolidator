@@ -2,6 +2,7 @@ import { Form } from '@inertiajs/react';
 import { useState } from 'react';
 import { destroy } from '@/actions/App/Http/Controllers/ListenController';
 import Heading from '@/components/heading';
+import InputError from '@/components/input-error';
 import { Button } from '@/components/ui/button';
 import {
     Dialog,
@@ -50,7 +51,9 @@ export default function DeleteListeningHistory() {
                             This cannot be undone. All of your imported listens
                             will be removed, but you can import your files
                             again. Remembered recording and catalog choices will
-                            be kept for future imports.
+                            be kept for future imports. Uploaded source files
+                            remain available for retry; delete them separately
+                            on the Imports page.
                         </DialogDescription>
                         <Form
                             {...destroy.form()}
@@ -60,27 +63,30 @@ export default function DeleteListeningHistory() {
                                 setDeleted(true);
                             }}
                         >
-                            {({ processing }) => (
-                                <DialogFooter className="gap-2">
-                                    <DialogClose asChild>
+                            {({ processing, errors }) => (
+                                <>
+                                    <InputError message={errors.history} />
+                                    <DialogFooter className="gap-2">
+                                        <DialogClose asChild>
+                                            <Button
+                                                type="button"
+                                                variant="secondary"
+                                                disabled={processing}
+                                            >
+                                                Cancel
+                                            </Button>
+                                        </DialogClose>
                                         <Button
-                                            type="button"
-                                            variant="secondary"
+                                            type="submit"
+                                            variant="destructive"
                                             disabled={processing}
                                         >
-                                            Cancel
+                                            {processing
+                                                ? 'Deleting...'
+                                                : 'Delete all listens'}
                                         </Button>
-                                    </DialogClose>
-                                    <Button
-                                        type="submit"
-                                        variant="destructive"
-                                        disabled={processing}
-                                    >
-                                        {processing
-                                            ? 'Deleting...'
-                                            : 'Delete all listens'}
-                                    </Button>
-                                </DialogFooter>
+                                    </DialogFooter>
+                                </>
                             )}
                         </Form>
                     </DialogContent>

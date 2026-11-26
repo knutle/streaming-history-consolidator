@@ -4,22 +4,43 @@ import InputError from '@/components/input-error';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { importMethod } from '@/routes/listens';
+import { store } from '@/routes/imports';
+
+export type ImportResult = {
+    imported: number;
+    duplicates: number;
+    matched: number;
+    errors?: { file: string; message: string }[];
+};
 
 type Props = {
     musicbrainzEnabled: boolean;
-    importResult: {
-        imported: number;
-        duplicates: number;
-        matched: number;
-        errors?: { file: string; message: string }[];
-    } | null;
     canImport: boolean;
 };
 
+export function ImportSummary({ result }: { result: ImportResult }) {
+    return (
+        <div role="status" className="space-y-2 text-sm">
+            <p>
+                Imported {result.imported}; already imported {result.duplicates}
+                ; matched {result.matched}. Each history file is imported
+                independently; a failed file is rolled back.
+            </p>
+            {!!result.errors?.length && (
+                <ul className="list-disc space-y-1 pl-5 text-destructive">
+                    {result.errors.map((error, index) => (
+                        <li key={index}>
+                            {error.file}: {error.message}
+                        </li>
+                    ))}
+                </ul>
+            )}
+        </div>
+    );
+}
+
 export default function ImportHistory({
     musicbrainzEnabled,
-    importResult,
     canImport,
 }: Props) {
     return (
@@ -41,7 +62,8 @@ export default function ImportHistory({
                 flags are retained; device and IP address data are not. Exact
                 catalog IDs also record whether a track appeared in the uploaded
                 library or playlists at export time, not necessarily when it was
-                played.
+                played. Spotify extended history does not identify the playlist
+                or container used for a listen.
             </p>
             <p className="text-sm text-muted-foreground">
                 Apple imports accept Apple Music Play Activity.csv or a full
@@ -50,7 +72,8 @@ export default function ImportHistory({
                 daily track history and library data. Re-imports skip previously
                 processed events and can identify previously unmatched listens.
                 Apple playback events are imported individually, not combined
-                into sessions.
+                into sessions. Playback container and playlist details are
+                retained when present in the Play Activity CSV.
             </p>
             <p className="text-sm text-muted-foreground">
                 Spotify account StreamingHistory_music files have less precise
@@ -65,28 +88,9 @@ export default function ImportHistory({
                     configure an existing database before importing.
                 </p>
             )}
-            {importResult && (
-                <div role="status" className="space-y-2 text-sm">
-                    <p>
-                        Imported {importResult.imported}; already imported{' '}
-                        {importResult.duplicates}; matched{' '}
-                        {importResult.matched}. Each history file is imported
-                        independently; a failed file is rolled back.
-                    </p>
-                    {!!importResult.errors?.length && (
-                        <ul className="list-disc space-y-1 pl-5 text-destructive">
-                            {importResult.errors.map((error, index) => (
-                                <li key={index}>
-                                    {error.file}: {error.message}
-                                </li>
-                            ))}
-                        </ul>
-                    )}
-                </div>
-            )}
             {canImport ? (
                 <Form
-                    {...importMethod.form()}
+                    {...store.form()}
                     encType="multipart/form-data"
                     className="flex flex-wrap items-end gap-3"
                 >
@@ -115,7 +119,7 @@ export default function ImportHistory({
                                     ))}
                             </div>
                             <Button disabled={processing}>
-                                {processing ? 'Importing…' : 'Import'}
+                                {processing ? 'Uploading…' : 'Start import'}
                             </Button>
                             {progress && (
                                 <span className="text-sm">
@@ -137,8 +141,9 @@ export default function ImportHistory({
                 values without a timezone are interpreted as UTC. Only music
                 events with positive playback duration are imported. MusicBrainz
                 artist aliases require the full database; the canonical CSV does
-                not contain aliases. Imports allow at least two hours of PHP
-                execution time; web server and proxy timeouts may still apply.
+                not contain aliases. Imports run in the background after upload.
+                Uploaded files are kept privately until you delete them or your
+                account, so you can retry an import.
             </p>
         </section>
     );

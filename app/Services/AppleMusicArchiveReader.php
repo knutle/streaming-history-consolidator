@@ -19,7 +19,7 @@ class AppleMusicArchiveReader
     /**
      * @return Generator<int, array{timestamp: string, track: string, artist: string, identity_artist: string, album: string, played_ms: int, duration_ms: ?int, uri: string, start_time: bool, isrc: ?string, apple_music: array<string, mixed>}>
      */
-    public function read(string $path): Generator
+    public function read(string $path, ?\Closure $checkAbort = null): Generator
     {
         if (! class_exists(ZipArchive::class)) {
             $this->invalid('Apple ZIP imports require the PHP zip extension.');
@@ -29,16 +29,18 @@ class AppleMusicArchiveReader
             $this->invalid('The Apple export is not a valid ZIP archive.');
         }
         try {
+            $checkAbort?->__invoke();
             $wrapper = $this->find($zip, 'Apple_Media_Services.zip');
             if ($wrapper === null) {
-                yield from $this->readMediaArchive($zip);
+                yield from $this->readMediaArchive($zip, $checkAbort);
             } else {
                 if ($this->find($zip, 'Apple Music Play Activity.csv') !== null) {
                     $this->invalid('The archive contains multiple Apple playback sources.');
                 }
                 [$nested, $temporary] = $this->openNested($zip, $wrapper);
                 try {
-                    yield from $this->readMediaArchive($nested);
+                    $checkAbort?->__invoke();
+                    yield from $this->readMediaArchive($nested, $checkAbort);
                 } finally {
                     $nested->close();
                     fclose($temporary);
@@ -49,7 +51,7 @@ class AppleMusicArchiveReader
         }
     }
 
-    private function readMediaArchive(ZipArchive $zip): Generator
+    private function readMediaArchive(ZipArchive $zip, ?\Closure $checkAbort): Generator
     {
         $playIndex = $this->find($zip, 'Apple Music Play Activity.csv');
         if ($playIndex === null) {
@@ -61,7 +63,7 @@ class AppleMusicArchiveReader
         if ($dailyIndex !== null) {
             $stream = $this->stream($zip, $dailyIndex);
             try {
-                $daily = $this->daily($stream);
+                $daily = $this->daily($stream, $checkAbort);
                 $this->verifyRead($zip, $dailyIndex, $stream);
             } finally {
                 fclose($stream);
@@ -83,7 +85,8 @@ class AppleMusicArchiveReader
                 }
                 $stream = $this->stream($nested, $trackIndex);
                 try {
-                    $library = $this->library($stream);
+                    $checkAbort?->__invoke();
+                    $library = $this->library($stream, $checkAbort);
                     $this->verifyRead($nested, $trackIndex, $stream);
                 } finally {
                     fclose($stream);
@@ -95,7 +98,7 @@ class AppleMusicArchiveReader
         } elseif ($plainIndex !== null) {
             $stream = $this->stream($zip, $plainIndex);
             try {
-                $library = $this->library($stream);
+                $library = $this->library($stream, $checkAbort);
                 $this->verifyRead($zip, $plainIndex, $stream);
             } finally {
                 fclose($stream);
@@ -170,7 +173,7 @@ class AppleMusicArchiveReader
      * @param  resource  $stream
      * @return array<string, array{artist: string, catalog_id: string}|null>
      */
-    private function daily($stream): array
+    private function daily($stream, ?\Closure $checkAbort): array
     {
         $headers = $this->reader->boundedCsvRow($stream);
         if ($headers === false) {
@@ -181,7 +184,11 @@ class AppleMusicArchiveReader
             $this->invalid('The Apple daily track history has an invalid header.');
         }
         $index = [];
+        $count = 0;
         while (($values = $this->reader->boundedCsvRow($stream)) !== false) {
+            if (++$count % 100 === 0) {
+                $checkAbort?->__invoke();
+            }
             if ($values === [null]) {
                 continue;
             }
@@ -226,13 +233,16 @@ class AppleMusicArchiveReader
      * @param  resource  $stream
      * @return array<string, list<array{track_artist: ?string, album_artist: ?string, catalog_id: ?string, duration_ms: ?int, genre: ?string, release_date: ?string, track_number: ?int, disc_number: ?int, isrc: ?string}>>
      */
-    private function library($stream): array
+    private function library($stream, ?\Closure $checkAbort): array
     {
         $index = [];
         $count = 0;
         foreach ($this->reader->jsonObjects($stream) as $row) {
             if (++$count > self::MAX_INDEX_ENTRIES) {
                 $this->invalid('The Apple Music library contains too many tracks.');
+            }
+            if ($count % 100 === 0) {
+                $checkAbort?->__invoke();
             }
             $title = $this->optionalText($row['Title'] ?? null);
             $album = $this->optionalText($row['Album'] ?? null);

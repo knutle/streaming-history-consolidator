@@ -1,7 +1,7 @@
 import { Head, Link } from '@inertiajs/react';
 import { dashboard } from '@/routes';
 import { index } from '@/routes/listens';
-import { edit } from '@/routes/profile';
+import { index as importsIndex } from '@/routes/imports';
 
 type Props = {
     stats: {
@@ -58,7 +58,7 @@ export default function Dashboard({ stats, imports }: Props) {
                     >
                         Identify unmatched listens
                     </Link>
-                    <Link href={edit()} className="underline">
+                    <Link href={importsIndex()} className="underline">
                         Import history
                     </Link>
                 </div>

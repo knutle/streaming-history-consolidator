@@ -132,7 +132,7 @@ class CatalogMatcher
         return $provider === 'spotify' ? 'https://open.spotify.com/track/'.$id : 'https://music.apple.com/us/song/'.$id;
     }
 
-    private function key(string $track, string $artist, ?string $album): ?string
+    public function key(string $track, string $artist, ?string $album): ?string
     {
         if (trim($track) === '' || trim($artist) === '' || $artist === 'Unknown artist' || trim($album ?? '') === '') {
             return null;
@@ -278,7 +278,11 @@ class CatalogMatcher
             if ($key !== null) {
                 DB::table('catalog_matches')->updateOrInsert(
                     ['user_id' => $user->id, 'song_key' => $key, 'provider' => $match['provider']],
-                    ['match' => json_encode($match, JSON_THROW_ON_ERROR), 'created_at' => now(), 'updated_at' => now()],
+                    ['match' => json_encode($match + [
+                        'source_track' => $current->track_name,
+                        'source_artist' => $current->artist_name,
+                        'source_album' => $current->release_name,
+                    ], JSON_THROW_ON_ERROR), 'created_at' => now(), 'updated_at' => now()],
                 );
                 unset($this->remembered[$user->id.':'.$key]);
             }

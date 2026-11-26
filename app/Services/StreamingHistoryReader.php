@@ -196,6 +196,21 @@ class StreamingHistoryReader
                 $albumArtist = $this->text($row['Album Artist'] ?? '');
             }
             $eventDetails = [];
+            foreach ([
+                'Container Name' => 'container_name',
+                'Container Type' => 'container_type',
+                'Container Album Name' => 'container_album_name',
+                'Container Artist Name' => 'container_artist_name',
+                'Container ID' => 'container_id',
+                'Container Global Playlist ID' => 'container_global_playlist_id',
+                'Container Playlist ID' => 'container_playlist_id',
+                'Source Radio Name' => 'source_radio_name',
+                'Source Radio Type' => 'source_radio_type',
+            ] as $column => $key) {
+                if (isset($row[$column]) && trim((string) $row[$column]) !== '') {
+                    $eventDetails[$key] = $this->text($row[$column]);
+                }
+            }
             if ($includeDetails) {
                 foreach (['End Reason Type' => 'end_reason', 'Source Type' => 'source_type', 'Offline' => 'offline', 'Shuffle Play' => 'shuffle', 'Repeat Play' => 'repeat'] as $column => $key) {
                     if (isset($row[$column]) && trim((string) $row[$column]) !== '') {

@@ -105,6 +105,8 @@ class ListenImportTest extends TestCase
         $this->delete(route('listens.destroy'))->assertRedirect(route('login'));
         $this->get(route('listens.show', 1))->assertRedirect(route('login'));
         $this->post(route('listens.match', 1))->assertRedirect(route('login'));
+        $this->get(route('matches.index'))->assertRedirect(route('login'));
+        $this->delete(route('matches.destroy', ['type' => 'recording', 'match' => 1]))->assertRedirect(route('login'));
     }
 
     public function test_deleting_listening_history_only_removes_the_current_users_listens_and_allows_reimport(): void
@@ -211,6 +213,61 @@ class ListenImportTest extends TestCase
         $this->post(route('listens.import'), [
             'source' => 'spotify', 'file' => $this->spotify([$first]),
         ])->assertSessionHas('import_result', ['imported' => 1, 'duplicates' => 0, 'matched' => 1]);
+    }
+
+    public function test_saved_recording_choices_can_be_reviewed_changed_and_removed_without_changing_existing_listens(): void
+    {
+        $this->musicbrainz();
+        $db = DB::connection('musicbrainz');
+        $db->table('recording')->insert(['id' => 2, 'gid' => 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'name' => 'Other Track', 'artist_credit' => 1]);
+        $user = User::factory()->create();
+        $other = User::factory()->create();
+        $this->actingAs($user)->post(route('listens.import'), [
+            'source' => 'spotify', 'file' => $this->spotify([$this->row('2024-01-01T12:00:00Z', album: 'Unknown album')]),
+        ])->assertSessionHasNoErrors();
+        $listen = Listen::query()->sole();
+        $this->post(route('listens.match', $listen->id), [
+            'recording_mbid' => '22222222-2222-4222-8222-222222222222', 'track_name' => 'Track', 'artist_name' => 'Artist',
+        ])->assertSessionHasNoErrors();
+        $row = DB::table('listen_matches')->where('user_id', $user->id)->first();
+        $saved = json_decode($row->match, true, 512, JSON_THROW_ON_ERROR);
+        unset($saved['source_track'], $saved['source_artist'], $saved['recording_name']);
+        DB::table('listen_matches')->where('id', $row->id)->update(['match' => json_encode($saved, JSON_THROW_ON_ERROR)]);
+        $otherId = DB::table('listen_matches')->insertGetId([
+            'user_id' => $other->id, 'song_key' => $row->song_key, 'match' => $row->match,
+            'created_at' => now(), 'updated_at' => now(),
+        ]);
+
+        $this->get(route('matches.index'))->assertOk()->assertInertia(fn (Assert $page) => $page
+            ->component('matches/index')->has('recordings.data', 1)
+            ->where('recordings.data.0.source_track', 'Track')
+            ->where('recordings.data.0.source_artist', 'Artist')
+            ->where('recordings.data.0.listen_id', $listen->id));
+        $this->get(route('matches.edit', ['match' => $row->id, 'q' => 'Other']))->assertOk()
+            ->assertInertia(fn (Assert $page) => $page->where('suggestions.0.track_name', 'Other Track'));
+        $this->put(route('matches.update', $otherId), [
+            'recording_mbid' => 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'track_name' => 'Other Track', 'artist_name' => 'Artist',
+        ])->assertNotFound();
+        $this->delete(route('matches.destroy', ['type' => 'recording', 'match' => $otherId]))->assertNotFound();
+        $this->put(route('matches.update', $row->id), [
+            'recording_mbid' => 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'track_name' => 'Other Track', 'artist_name' => 'Artist',
+        ])->assertRedirect(route('matches.index'));
+        $changed = json_decode(DB::table('listen_matches')->where('id', $row->id)->value('match'), true, 512, JSON_THROW_ON_ERROR);
+        $this->assertSame('Track', $changed['source_track']);
+        $this->assertSame('Artist', $changed['source_artist']);
+        $this->assertSame('22222222-2222-4222-8222-222222222222', $listen->fresh()->recording_mbid);
+        config(['musicbrainz.enabled' => false]);
+        $this->post(route('listens.import'), [
+            'source' => 'spotify', 'file' => $this->spotify([$this->row('2024-01-02T12:00:00Z', album: 'Unknown album')]),
+        ])->assertSessionHasNoErrors();
+        $this->assertSame('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', Listen::query()->latest('id')->firstOrFail()->recording_mbid);
+        $this->delete(route('matches.destroy', ['type' => 'recording', 'match' => $row->id]))->assertRedirect(route('matches.index'));
+        $this->assertSame('22222222-2222-4222-8222-222222222222', $listen->fresh()->recording_mbid);
+        $this->assertDatabaseHas('listen_matches', ['id' => $otherId, 'user_id' => $other->id]);
+        $this->post(route('listens.import'), [
+            'source' => 'spotify', 'file' => $this->spotify([$this->row('2024-01-03T12:00:00Z', album: 'Unknown album')]),
+        ])->assertSessionHasNoErrors();
+        $this->assertNull(Listen::query()->latest('id')->firstOrFail()->recording_mbid);
     }
 
     public function test_import_matches_artist_casing_and_aliases_without_changing_imported_names(): void
