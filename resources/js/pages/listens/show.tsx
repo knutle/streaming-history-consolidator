@@ -1,12 +1,21 @@
-import { Form, Head, Link, usePage } from '@inertiajs/react';
-import { useState } from 'react';
+import { Form, Head, Link, useHttp, usePage } from '@inertiajs/react';
+import { useRef, useState } from 'react';
 import InputError from '@/components/input-error';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { show as albumShow } from '@/routes/albums';
 import { show as artistShow } from '@/routes/artists';
-import { catalog, index, match, show } from '@/routes/listens';
+import { catalog, index, match, show, spotifyLookup } from '@/routes/listens';
+
+type SpotifyMetadata = {
+    track_name: string;
+    artist_name: string;
+    release_name: string | null;
+    duration_ms: number | null;
+    isrc: string | null;
+    url: string;
+};
 
 type Listen = {
     id: number;
@@ -132,6 +141,76 @@ export default function ListenDetails({
     const [selectedCatalog, setSelectedCatalog] = useState<'apple' | 'spotify'>(
         'apple',
     );
+    const lookup = useHttp<{ catalog_url: string }, SpotifyMetadata>({
+        catalog_url: '',
+    });
+    const [lookupError, setLookupError] = useState<{
+        listenId: number;
+        message: string;
+    } | null>(null);
+    const [spotifySource, setSpotifySource] = useState<{
+        listenId: number;
+        url: string;
+    } | null>(null);
+    const catalogUrlInput = useRef<HTMLInputElement>(null);
+    const trackInput = useRef<HTMLInputElement>(null);
+    const artistInput = useRef<HTMLInputElement>(null);
+    const albumInput = useRef<HTMLInputElement>(null);
+    const durationInput = useRef<HTMLInputElement>(null);
+    const isrcInput = useRef<HTMLInputElement>(null);
+
+    async function lookupSpotify() {
+        const urlInput = catalogUrlInput.current;
+        if (!urlInput) return;
+        const requestedUrl = urlInput.value;
+        setLookupError(null);
+        setSpotifySource(null);
+        lookup.setData('catalog_url', requestedUrl);
+        try {
+            await lookup.submit(spotifyLookup(listen.id), {
+                onSuccess: (metadata) => {
+                    if (
+                        catalogUrlInput.current !== urlInput ||
+                        urlInput.value !== requestedUrl
+                    ) {
+                        return;
+                    }
+                    if (trackInput.current)
+                        trackInput.current.value = metadata.track_name;
+                    if (artistInput.current)
+                        artistInput.current.value = metadata.artist_name;
+                    if (albumInput.current)
+                        albumInput.current.value = metadata.release_name ?? '';
+                    if (durationInput.current)
+                        durationInput.current.value =
+                            metadata.duration_ms?.toString() ?? '';
+                    if (isrcInput.current)
+                        isrcInput.current.value = metadata.isrc ?? '';
+                    setSpotifySource({
+                        listenId: listen.id,
+                        url: metadata.url,
+                    });
+                },
+                onError: (errors) => {
+                    if (catalogUrlInput.current === urlInput) {
+                        setLookupError({
+                            listenId: listen.id,
+                            message:
+                                errors.catalog_url ?? 'Spotify lookup failed.',
+                        });
+                    }
+                },
+            });
+        } catch {
+            if (catalogUrlInput.current === urlInput) {
+                setLookupError({
+                    listenId: listen.id,
+                    message:
+                        'Could not complete the Spotify lookup. Please try again.',
+                });
+            }
+        }
+    }
     const { errors } = usePage().props;
     const info = listen.track_metadata.additional_info;
     const apple = info.apple_music;
@@ -369,6 +448,23 @@ export default function ListenDetails({
                         track, artist, and album. Catalog metadata is saved per
                         track link; recording ISRCs are listed separately.
                     </p>
+                    <p className="mt-2 text-sm text-muted-foreground">
+                        Spotify metadata lookup contacts Spotify only when you
+                        request it. Create an app in the{' '}
+                        <a
+                            href="https://developer.spotify.com/dashboard"
+                            target="_blank"
+                            rel="noreferrer"
+                            className="underline"
+                        >
+                            Spotify developer dashboard
+                        </a>{' '}
+                        and configure SPOTIFY_CLIENT_ID and
+                        SPOTIFY_CLIENT_SECRET in the server's .env file.
+                        SPOTIFY_MARKET is a two-letter country code and defaults
+                        to US. Spotify development-mode apps require the app
+                        owner to have Premium.
+                    </p>
                     <div className="mt-3 flex flex-wrap gap-4 text-sm">
                         {(['spotify', 'apple'] as const).map((provider) => {
                             const item = catalogs[provider];
@@ -462,6 +558,7 @@ export default function ListenDetails({
                                         name="provider"
                                         className="h-9 rounded-md border border-input bg-background px-3 text-sm"
                                         value={selectedCatalog}
+                                        disabled={lookup.processing}
                                         onChange={(event) => {
                                             setSelectedCatalog(
                                                 event.target.value === 'spotify'
@@ -469,6 +566,8 @@ export default function ListenDetails({
                                                     : 'apple',
                                             );
                                             clearErrors();
+                                            setLookupError(null);
+                                            setSpotifySource(null);
                                         }}
                                     >
                                         <option value="apple">
@@ -484,6 +583,7 @@ export default function ListenDetails({
                                     </Label>
                                     <Input
                                         key={inputKey}
+                                        ref={catalogUrlInput}
                                         id="catalog-url"
                                         name="catalog_url"
                                         defaultValue={
@@ -496,8 +596,58 @@ export default function ListenDetails({
                                         }
                                         required
                                         maxLength={2048}
+                                        readOnly={lookup.processing}
+                                        onChange={() => {
+                                            setLookupError(null);
+                                            setSpotifySource(null);
+                                        }}
                                     />
                                     <InputError message={errors.catalog_url} />
+                                    {selectedCatalog === 'spotify' && (
+                                        <>
+                                            <div>
+                                                <Button
+                                                    type="button"
+                                                    variant="outline"
+                                                    disabled={
+                                                        lookup.processing ||
+                                                        processing
+                                                    }
+                                                    onClick={() =>
+                                                        void lookupSpotify()
+                                                    }
+                                                >
+                                                    {lookup.processing
+                                                        ? 'Retrieving metadata...'
+                                                        : 'Retrieve Spotify metadata'}
+                                                </Button>
+                                            </div>
+                                            <InputError
+                                                message={
+                                                    lookupError?.listenId ===
+                                                    listen.id
+                                                        ? lookupError.message
+                                                        : ''
+                                                }
+                                            />
+                                            {spotifySource?.listenId ===
+                                                listen.id && (
+                                                <p className="text-sm text-muted-foreground">
+                                                    Metadata supplied by{' '}
+                                                    <a
+                                                        href={spotifySource.url}
+                                                        target="_blank"
+                                                        rel="noreferrer"
+                                                        className="underline"
+                                                    >
+                                                        Spotify
+                                                    </a>
+                                                    . Review and save the match
+                                                    below.
+                                                </p>
+                                            )}
+                                        </>
+                                    )}
                                 </div>
                                 <div className="grid gap-2">
                                     <Label htmlFor="catalog-track">
@@ -505,6 +655,7 @@ export default function ListenDetails({
                                     </Label>
                                     <Input
                                         key={inputKey}
+                                        ref={trackInput}
                                         id="catalog-track"
                                         name="catalog_track"
                                         defaultValue={
@@ -513,6 +664,7 @@ export default function ListenDetails({
                                         }
                                         required
                                         maxLength={255}
+                                        readOnly={lookup.processing}
                                     />
                                     <InputError
                                         message={errors.catalog_track}
@@ -524,6 +676,7 @@ export default function ListenDetails({
                                     </Label>
                                     <Input
                                         key={inputKey}
+                                        ref={artistInput}
                                         id="catalog-artist"
                                         name="catalog_artist"
                                         defaultValue={
@@ -535,6 +688,7 @@ export default function ListenDetails({
                                         }
                                         required
                                         maxLength={255}
+                                        readOnly={lookup.processing}
                                     />
                                     <InputError
                                         message={errors.catalog_artist}
@@ -546,6 +700,7 @@ export default function ListenDetails({
                                     </Label>
                                     <Input
                                         key={inputKey}
+                                        ref={albumInput}
                                         id="catalog-album"
                                         name="catalog_album"
                                         defaultValue={
@@ -555,6 +710,7 @@ export default function ListenDetails({
                                                 : (listen.release_name ?? '')
                                         }
                                         maxLength={255}
+                                        readOnly={lookup.processing}
                                     />
                                     <InputError
                                         message={errors.catalog_album}
@@ -566,11 +722,13 @@ export default function ListenDetails({
                                     </Label>
                                     <Input
                                         key={inputKey}
+                                        ref={isrcInput}
                                         id="catalog-isrc"
                                         name="catalog_isrc"
                                         defaultValue={catalogMatch?.isrc ?? ''}
                                         maxLength={15}
                                         placeholder="USABC2412345"
+                                        readOnly={lookup.processing}
                                     />
                                     <InputError message={errors.catalog_isrc} />
                                 </div>
@@ -580,6 +738,7 @@ export default function ListenDetails({
                                     </Label>
                                     <Input
                                         key={inputKey}
+                                        ref={durationInput}
                                         id="catalog-duration"
                                         name="catalog_duration"
                                         type="number"
@@ -591,13 +750,18 @@ export default function ListenDetails({
                                                   '')
                                                 : (info.duration_ms ?? '')
                                         }
+                                        readOnly={lookup.processing}
                                     />
                                     <InputError
                                         message={errors.catalog_duration}
                                     />
                                 </div>
                                 <div>
-                                    <Button disabled={processing}>
+                                    <Button
+                                        disabled={
+                                            processing || lookup.processing
+                                        }
+                                    >
                                         Save catalog match
                                     </Button>
                                 </div>

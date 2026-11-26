@@ -8,10 +8,12 @@ use App\Services\CatalogMatcher;
 use App\Services\Isrc;
 use App\Services\ManualListenMatcher;
 use App\Services\MusicBrainzMatcher;
+use App\Services\SpotifyCatalogLookup;
 use App\Services\StreamingHistoryImporter;
 use App\Services\StreamingHistoryUpload;
 use Carbon\CarbonImmutable;
 use Illuminate\Contracts\Auth\MustVerifyEmail;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -183,6 +185,18 @@ class ListenController extends Controller
         $count = $matcher->remember($request->user(), $item, $match);
 
         return to_route('listens.show', $item->id)->with('catalog_result', $count);
+    }
+
+    public function lookupSpotify(Request $request, int $listen, CatalogMatcher $matcher, SpotifyCatalogLookup $lookup): JsonResponse
+    {
+        Listen::query()->where('user_id', $request->user()->id)->findOrFail($listen);
+        $values = $request->validate(['catalog_url' => ['required', 'string', 'max:2048']]);
+        $id = $matcher->identifier('spotify', $values['catalog_url']);
+        if ($id === null) {
+            throw ValidationException::withMessages(['catalog_url' => 'Enter a valid Spotify track link or URI.']);
+        }
+
+        return response()->json($lookup->track($id));
     }
 
     public function match(Request $request, int $listen, MusicBrainzMatcher $matcher, ManualListenMatcher $manualMatcher): RedirectResponse

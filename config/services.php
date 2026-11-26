@@ -22,6 +22,12 @@ return [
         'key' => env('RESEND_API_KEY'),
     ],
 
+    'spotify' => [
+        'client_id' => env('SPOTIFY_CLIENT_ID'),
+        'client_secret' => env('SPOTIFY_CLIENT_SECRET'),
+        'market' => env('SPOTIFY_MARKET', 'US'),
+    ],
+
     'ses' => [
         'key' => env('AWS_ACCESS_KEY_ID'),
         'secret' => env('AWS_SECRET_ACCESS_KEY'),

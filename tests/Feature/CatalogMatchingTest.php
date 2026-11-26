@@ -336,4 +336,155 @@ class CatalogMatchingTest extends TestCase
         $this->assertDatabaseCount('listens', 0);
         $this->assertDatabaseCount('catalog_track_metadata', 0);
     }
+
+    public function test_spotify_lookup_returns_metadata_without_saving_a_match(): void
+    {
+        config([
+            'musicbrainz.enabled' => false,
+            'services.spotify.client_id' => 'client',
+            'services.spotify.client_secret' => 'secret',
+            'services.spotify.market' => 'NO',
+        ]);
+        Http::preventStrayRequests();
+        $this->actingAs(User::factory()->create());
+        $this->import('2024-01-01T12:00:00Z');
+        $listen = Listen::query()->sole();
+        $before = $listen->track_metadata;
+        $stored = DB::table('catalog_track_metadata')->get()->toArray();
+        Http::fake([
+            'accounts.spotify.com/api/token' => Http::response(['access_token' => 'token']),
+            'api.spotify.com/v1/tracks/*' => Http::response($this->spotifyTrack()),
+        ]);
+
+        $this->postJson(route('listens.spotify-lookup', $listen->id), [
+            'catalog_url' => 'https://open.spotify.com/track/0123456789ABCDEFGHIJKL?si=test',
+        ])->assertOk()->assertExactJson([
+            'track_name' => 'Spotify track',
+            'artist_name' => 'First artist, Second artist',
+            'release_name' => 'Spotify album',
+            'duration_ms' => 181000,
+            'isrc' => 'USABC2412345',
+            'url' => 'https://open.spotify.com/track/0123456789ABCDEFGHIJKL',
+        ]);
+
+        Http::assertSent(fn ($request) => $request->url() === 'https://accounts.spotify.com/api/token'
+            && $request->hasHeader('Authorization', 'Basic '.base64_encode('client:secret'))
+            && $request['grant_type'] === 'client_credentials');
+        Http::assertSent(fn ($request) => $request->url() === 'https://api.spotify.com/v1/tracks/0123456789ABCDEFGHIJKL?market=NO'
+            && $request->hasHeader('Authorization', 'Bearer token'));
+        Http::assertSentCount(2);
+        $this->assertSame($before, $listen->fresh()->track_metadata);
+        $this->assertEquals($stored, DB::table('catalog_track_metadata')->get()->toArray());
+        $this->assertDatabaseCount('catalog_matches', 0);
+    }
+
+    public function test_spotify_lookup_checks_authentication_ownership_and_link_before_requesting_spotify(): void
+    {
+        config(['musicbrainz.enabled' => false, 'services.spotify.client_id' => 'client', 'services.spotify.client_secret' => 'secret']);
+        Http::preventStrayRequests();
+        $this->postJson(route('listens.spotify-lookup', 1), [])->assertUnauthorized();
+        $owner = User::factory()->create();
+        $this->actingAs($owner);
+        $this->import('2024-01-01T12:00:00Z');
+        $listen = Listen::query()->sole();
+        $this->actingAs(User::factory()->create())->postJson(route('listens.spotify-lookup', $listen->id), [
+            'catalog_url' => 'spotify:track:0123456789ABCDEFGHIJKL',
+        ])->assertNotFound();
+        $this->actingAs($owner)->postJson(route('listens.spotify-lookup', $listen->id), [
+            'catalog_url' => 'https://open.spotify.com.attacker.test/track/0123456789ABCDEFGHIJKL',
+        ])->assertUnprocessable()->assertJsonValidationErrors('catalog_url');
+        Http::assertNothingSent();
+    }
+
+    public function test_spotify_lookup_reports_configuration_and_upstream_errors(): void
+    {
+        config(['musicbrainz.enabled' => false, 'services.spotify.client_id' => null, 'services.spotify.client_secret' => null]);
+        Http::preventStrayRequests();
+        $this->actingAs(User::factory()->create());
+        $this->import('2024-01-01T12:00:00Z');
+        $route = route('listens.spotify-lookup', Listen::query()->sole()->id);
+        $data = ['catalog_url' => 'spotify:track:0123456789ABCDEFGHIJKL'];
+        $this->postJson($route, $data)->assertUnprocessable()->assertJsonFragment([
+            'Spotify lookup is not configured. Set SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET on the server.',
+        ]);
+        Http::assertNothingSent();
+        config(['services.spotify.client_id' => 'client', 'services.spotify.client_secret' => 'secret', 'services.spotify.market' => 'invalid']);
+        $this->postJson($route, $data)->assertUnprocessable()->assertJsonValidationErrors('catalog_url');
+        Http::assertNothingSent();
+
+        config(['services.spotify.market' => 'US']);
+        $tokenStatus = 200;
+        $trackStatus = 200;
+        $connectionFailed = false;
+        $token = ['access_token' => 'token'];
+        Http::fake(function ($request) use (&$tokenStatus, &$trackStatus, &$connectionFailed, &$token) {
+            if ($request->url() === 'https://accounts.spotify.com/api/token') {
+                return $connectionFailed ? Http::failedConnection() : Http::response($token, $tokenStatus);
+            }
+
+            return Http::response([], $trackStatus);
+        });
+        foreach ([401, 403, 429, 500] as $status) {
+            $tokenStatus = $status;
+            $this->postJson($route, $data)->assertUnprocessable()->assertJsonValidationErrors('catalog_url');
+        }
+        $tokenStatus = 200;
+        $token = [];
+        $this->postJson($route, $data)->assertUnprocessable()->assertJsonFragment(['Spotify returned an invalid authorization response.']);
+        $token = ['access_token' => 'token'];
+        $connectionFailed = true;
+        $this->postJson($route, $data)->assertUnprocessable()->assertJsonFragment(['Could not connect to Spotify. Please try again.']);
+        $connectionFailed = false;
+        foreach ([404, 429, 500] as $status) {
+            $trackStatus = $status;
+            $this->postJson($route, $data)->assertUnprocessable()->assertJsonValidationErrors('catalog_url');
+        }
+    }
+
+    public function test_spotify_lookup_handles_partial_and_invalid_metadata_and_relinked_tracks(): void
+    {
+        config([
+            'musicbrainz.enabled' => false, 'services.spotify.client_id' => 'client',
+            'services.spotify.client_secret' => 'secret', 'services.spotify.market' => 'US',
+        ]);
+        Http::preventStrayRequests();
+        $this->actingAs(User::factory()->create());
+        $this->import('2024-01-01T12:00:00Z');
+        $route = route('listens.spotify-lookup', Listen::query()->sole()->id);
+        $data = ['catalog_url' => 'spotify:track:0123456789ABCDEFGHIJKL'];
+        $partial = $this->spotifyTrack();
+        unset($partial['album'], $partial['duration_ms'], $partial['external_ids']);
+        $track = $partial;
+        Http::fake(function ($request) use (&$track) {
+            return $request->url() === 'https://accounts.spotify.com/api/token'
+                ? Http::response(['access_token' => 'token']) : Http::response($track);
+        });
+        $this->postJson($route, $data)->assertOk()->assertJsonPath('release_name', null)
+            ->assertJsonPath('duration_ms', null)->assertJsonPath('isrc', null);
+
+        foreach ([
+            ['id' => 'ABCDEFGHIJKLMNOPQRSTUV'],
+            ['artists' => []],
+            ['duration_ms' => 'invalid'],
+            ['external_ids' => ['isrc' => 'invalid']],
+            ['album' => 'invalid'],
+            ['external_ids' => 'invalid'],
+            ['is_playable' => false],
+        ] as $invalid) {
+            $track = [...$this->spotifyTrack(), ...$invalid];
+            $this->postJson($route, $data)->assertUnprocessable()->assertJsonValidationErrors('catalog_url');
+        }
+    }
+
+    private function spotifyTrack(): array
+    {
+        return [
+            'id' => '0123456789ABCDEFGHIJKL',
+            'name' => 'Spotify track',
+            'artists' => [['name' => 'First artist'], ['name' => 'Second artist']],
+            'album' => ['name' => 'Spotify album'],
+            'duration_ms' => 181000,
+            'external_ids' => ['isrc' => 'US-ABC-24-12345'],
+        ];
+    }
 }
