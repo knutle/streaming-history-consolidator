@@ -18,6 +18,7 @@ class StreamingHistoryImporter
         private ManualListenMatcher $manualMatcher,
         private AppleMusicArchiveReader $archiveReader,
         private CatalogMatcher $catalogMatcher,
+        private MatchedMusicMetadata $matchedMetadata,
     ) {}
 
     /** @return array{imported: int, duplicates: int, matched: int} */
@@ -47,7 +48,7 @@ class StreamingHistoryImporter
                 $identity = ['user_id' => $user->id, 'source' => $source, 'fingerprint' => $fingerprint];
                 $existing = Listen::query()->where($identity)->first();
                 if ($existing !== null) {
-                    if ($archive && $existing->track_name === $entry['track'] && ($existing->release_name ?? '') === $entry['album']) {
+                    if ($existing->track_name === $entry['track'] && ($existing->release_name ?? '') === $entry['album']) {
                         $this->enrichExisting($existing, $entry, $appleMusic, $user, $matches);
                     }
                     if ($existing->track_name === $entry['track'] && ($existing->release_name ?? '') === $entry['album']) {
@@ -59,6 +60,7 @@ class StreamingHistoryImporter
                             $existing->update(['track_metadata' => $metadata]);
                         }
                     }
+                    $this->matchedMetadata->sync($existing);
                     $counts['duplicates']++;
 
                     continue;
@@ -125,6 +127,7 @@ class StreamingHistoryImporter
                     'track_metadata' => $metadata,
                 ]);
                 if ($listen->wasRecentlyCreated) {
+                    $this->matchedMetadata->sync($listen);
                     $counts['imported']++;
                     $counts['matched'] += (int) ($match !== null);
                 } else {
@@ -158,17 +161,19 @@ class StreamingHistoryImporter
 
     /**
      * @param  array{track: string, artist: string, album: string}  $entry
-     * @param  array<string, mixed>  $appleMusic
+     * @param  array<string, mixed>|null  $appleMusic
      * @param  array<string, mixed>  $matches
      */
-    private function enrichExisting(Listen $listen, array $entry, array $appleMusic, User $user, array &$matches): void
+    private function enrichExisting(Listen $listen, array $entry, ?array $appleMusic, User $user, array &$matches): void
     {
         $metadata = $listen->track_metadata;
-        $existing = $metadata['additional_info']['apple_music'] ?? [];
-        if (! is_array($existing)) {
-            throw ValidationException::withMessages(['file' => 'An existing listen has invalid Apple Music metadata.']);
+        if ($appleMusic !== null) {
+            $existing = $metadata['additional_info']['apple_music'] ?? [];
+            if (! is_array($existing)) {
+                throw ValidationException::withMessages(['file' => 'An existing listen has invalid Apple Music metadata.']);
+            }
+            $metadata['additional_info']['apple_music'] = $existing + $appleMusic;
         }
-        $metadata['additional_info']['apple_music'] = $existing + $appleMusic;
         $artist = $listen->artist_name;
         if ($artist === 'Unknown artist' && $entry['artist'] !== '' && $listen->recording_mbid === null) {
             $artist = $entry['artist'];

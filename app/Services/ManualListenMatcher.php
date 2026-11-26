@@ -9,6 +9,8 @@ use Illuminate\Validation\ValidationException;
 
 class ManualListenMatcher
 {
+    public function __construct(private MatchedMusicMetadata $matchedMetadata) {}
+
     public function key(string $track, string $artist): string
     {
         return hash('sha256', json_encode([
@@ -53,6 +55,7 @@ class ManualListenMatcher
                             $metadata['additional_info']['artist_mbids'] = $match['artist_mbids'];
                         }
                         $candidate->update(['recording_mbid' => $match['recording_mbid'], 'track_metadata' => $metadata]);
+                        $this->matchedMetadata->sync($candidate);
                         $updated++;
                     }
                 });

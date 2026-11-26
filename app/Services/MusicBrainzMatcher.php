@@ -106,9 +106,6 @@ class MusicBrainzMatcher
             ->where('recording.name', $track)
             ->select('recording.id', 'recording.gid', 'artist_credit.id as artist_credit_id', 'artist_credit.name as artist_name');
 
-        if ($artist !== '') {
-            $query->where('artist_credit.name', $artist);
-        }
         if ($album !== '') {
             $query->whereExists(function ($query) use ($album) {
                 $query->selectRaw('1')
@@ -120,14 +117,26 @@ class MusicBrainzMatcher
             });
         }
 
-        $recordings = $query->limit(2)->get();
-        if ($recordings->count() !== 1) {
+        $recordings = $this->matchingRecords($query->cursor(), $artist, 'artist_name');
+        if (count($recordings) === 0 && $artist !== '') {
+            $aliases = (clone $query)
+                ->join('artist_credit_name', 'artist_credit_name.artist_credit', '=', 'artist_credit.id')
+                ->join('artist_alias', 'artist_alias.artist', '=', 'artist_credit_name.artist')
+                ->whereNotExists(function ($subquery) {
+                    $subquery->selectRaw('1')->from('artist_credit_name as other_credit')
+                        ->whereColumn('other_credit.artist_credit', 'artist_credit.id')
+                        ->whereColumn('other_credit.position', '!=', 'artist_credit_name.position');
+                })
+                ->addSelect('artist_alias.name as alias_name');
+            $recordings = $this->matchingRecords($aliases->cursor(), $artist, 'alias_name');
+        }
+        if (count($recordings) !== 1) {
             return null;
         }
-        $recording = $recordings->first();
+        $recording = reset($recordings);
         $artistMbids = $db->table('artist_credit_name')
             ->join('artist', 'artist.id', '=', 'artist_credit_name.artist')
-            ->where('artist_credit_name.artist_credit', $recording->artist_credit_id)
+            ->where('artist_credit_name.artist_credit', $recording['artist_credit_id'])
             ->orderBy('artist_credit_name.position')
             ->pluck('artist.gid')->map(fn ($gid) => (string) $gid)->values()->all();
         $artistMbids = array_values($artistMbids);
@@ -137,7 +146,7 @@ class MusicBrainzMatcher
             $releases = $db->table('track')
                 ->join('medium', 'track.medium', '=', 'medium.id')
                 ->join('release', 'medium.release', '=', 'release.id')
-                ->where('track.recording', $recording->id)
+                ->where('track.recording', $recording['id'])
                 ->where('release.name', $album)
                 ->distinct()->limit(2)->pluck('release.gid');
             if ($releases->count() === 1) {
@@ -146,8 +155,8 @@ class MusicBrainzMatcher
         }
 
         return [
-            'recording_mbid' => (string) $recording->gid,
-            'artist_name' => (string) $recording->artist_name,
+            'recording_mbid' => $recording['gid'],
+            'artist_name' => $recording['artist_name'],
             'artist_mbids' => $artistMbids,
             'release_mbid' => $releaseMbid,
         ];
@@ -160,29 +169,114 @@ class MusicBrainzMatcher
     {
         $query = DB::connection('musicbrainz')->table('canonical_recordings')
             ->where('recording_name', $track);
-        if ($artist !== '') {
-            $query->where('artist_credit_name', $artist);
-        }
         if ($album !== '') {
             $query->where('release_name', $album);
         }
-        $recordings = (clone $query)->distinct()->limit(2)->pluck('recording_mbid');
-        if ($recordings->count() !== 1) {
+        $recordings = [];
+        $credits = [];
+        $releases = [];
+        foreach ($query->cursor() as $row) {
+            if ($artist !== '' && ! $this->sameArtist((string) $row->artist_credit_name, $artist)) {
+                continue;
+            }
+            $recordings[$row->recording_mbid] = true;
+            $credits[json_encode([$row->artist_credit_name, $row->artist_mbids], JSON_THROW_ON_ERROR)] = $row;
+            if ($album !== '') {
+                $releases[$row->release_mbid] = true;
+            }
+            if (count($recordings) > 1 || count($credits) > 1) {
+                return null;
+            }
+        }
+        if (count($recordings) !== 1 || count($credits) !== 1) {
             return null;
         }
-        $query->where('recording_mbid', $recordings->first());
-        $credits = (clone $query)->distinct()->limit(2)->get(['artist_credit_name', 'artist_mbids']);
-        if ($credits->count() !== 1) {
-            return null;
-        }
-        $row = $credits->first();
-        $releases = $album === '' ? collect() : $query->distinct()->limit(2)->pluck('release_mbid');
+        $row = reset($credits);
 
         return [
-            'recording_mbid' => (string) $recordings->first(),
+            'recording_mbid' => (string) array_key_first($recordings),
             'artist_name' => (string) $row->artist_credit_name,
             'artist_mbids' => $row->artist_mbids === '' ? [] : explode(',', $row->artist_mbids),
-            'release_mbid' => $releases->count() === 1 ? (string) $releases->first() : null,
+            'release_mbid' => count($releases) === 1 ? (string) array_key_first($releases) : null,
         ];
+    }
+
+    /**
+     * @param  iterable<\stdClass>  $rows
+     * @return array<string, array{id: int, gid: string, artist_credit_id: int, artist_name: string}>
+     */
+    private function matchingRecords(iterable $rows, string $artist, string $field): array
+    {
+        $matches = [];
+        foreach ($rows as $row) {
+            if ($artist !== '' && ! $this->sameArtist((string) $row->{$field}, $artist)) {
+                continue;
+            }
+            $matches[(string) $row->gid] = [
+                'id' => (int) $row->id,
+                'gid' => (string) $row->gid,
+                'artist_credit_id' => (int) $row->artist_credit_id,
+                'artist_name' => (string) $row->artist_name,
+            ];
+            if (count($matches) > 1) {
+                break;
+            }
+        }
+
+        return $matches;
+    }
+
+    private function sameArtist(string $left, string $right): bool
+    {
+        return mb_convert_case($left, MB_CASE_FOLD, 'UTF-8') === mb_convert_case($right, MB_CASE_FOLD, 'UTF-8');
+    }
+
+    /**
+     * @param  list<string>  $mbids
+     * @return array<string, array{name: string, source: string}>
+     */
+    public function artistNames(array $mbids, string $recording, string $track): array
+    {
+        if (! config('musicbrainz.enabled') || $mbids === []) {
+            return [];
+        }
+        $db = DB::connection('musicbrainz');
+        if (config('musicbrainz.format') === 'canonical' && $db->getDriverName() === 'sqlite') {
+            if (count($mbids) !== 1) {
+                return [];
+            }
+            $names = $db->table('canonical_recordings')->where('recording_name', $track)
+                ->where('recording_mbid', $recording)->where('artist_mbids', $mbids[0])
+                ->distinct()->limit(2)->pluck('artist_credit_name');
+
+            return $names->count() === 1 ? [$mbids[0] => ['name' => (string) $names->first(), 'source' => 'canonical_credit']] : [];
+        }
+
+        $names = [];
+        foreach ($db->table('artist')->whereIn('gid', $mbids)->get(['name', 'gid']) as $row) {
+            $names[(string) $row->gid] = ['name' => (string) $row->name, 'source' => 'musicbrainz'];
+        }
+
+        return $names;
+    }
+
+    public function releaseForRecording(string $recording, ?string $album, string $track): ?string
+    {
+        if (! config('musicbrainz.enabled') || $album === null || $album === '') {
+            return null;
+        }
+        $db = DB::connection('musicbrainz');
+        if (config('musicbrainz.format') === 'canonical' && $db->getDriverName() === 'sqlite') {
+            $releases = $db->table('canonical_recordings')->where('recording_name', $track)->where('recording_mbid', $recording)
+                ->where('release_name', $album)->distinct()->limit(2)->pluck('release_mbid');
+        } else {
+            $releases = $db->table('recording')->join('track', 'track.recording', '=', 'recording.id')
+                ->join('medium', 'medium.id', '=', 'track.medium')
+                ->join('release', 'release.id', '=', 'medium.release')
+                ->where('recording.gid', $recording)->where('release.name', $album)
+                ->distinct()->limit(2)->pluck('release.gid');
+        }
+
+        return $releases->count() === 1 ? (string) $releases->first() : null;
     }
 }

@@ -60,6 +60,15 @@ class ListenController extends Controller
             ->orderBy('id', 'desc')
             ->paginate(25)
             ->withQueryString();
+        $ids = $listens->getCollection()->modelKeys();
+        $artists = DB::table('listen_artists')->join('music_artists', 'music_artists.id', '=', 'listen_artists.music_artist_id')
+            ->whereIn('listen_artists.listen_id', $ids)->get(['listen_artists.listen_id', 'music_artists.mbid'])->groupBy('listen_id');
+        $albums = DB::table('listen_releases')->join('music_releases', 'music_releases.id', '=', 'listen_releases.music_release_id')
+            ->whereIn('listen_releases.listen_id', $ids)->get(['listen_releases.listen_id', 'music_releases.mbid'])->groupBy('listen_id');
+        $listens->getCollection()->each(function ($listen) use ($artists, $albums) {
+            $listen->setAttribute('matched_artist_mbids', $artists->get($listen->id, collect())->pluck('mbid')->all());
+            $listen->setAttribute('matched_album_mbids', $albums->get($listen->id, collect())->pluck('mbid')->all());
+        });
 
         return Inertia::render('listens/index', [
             'listens' => $listens,
@@ -106,6 +115,14 @@ class ListenController extends Controller
             'catalogResult' => $request->session()->get('catalog_result'),
             'catalogs' => $catalogMatcher->forListen($item, includeRelated: true),
             'musicBrainzSeed' => $item->recording_mbid === null ? $catalogMatcher->musicBrainzSeed($item) : null,
+            'matchedArtists' => DB::table('music_artists')
+                ->join('listen_artists', 'listen_artists.music_artist_id', '=', 'music_artists.id')
+                ->where('listen_artists.listen_id', $item->id)->orderBy('music_artists.id')
+                ->get(['music_artists.mbid', 'music_artists.name']),
+            'matchedAlbums' => DB::table('music_releases')
+                ->join('listen_releases', 'listen_releases.music_release_id', '=', 'music_releases.id')
+                ->where('listen_releases.listen_id', $item->id)
+                ->get(['music_releases.mbid', 'music_releases.name']),
         ]);
     }
 

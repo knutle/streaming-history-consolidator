@@ -4,6 +4,8 @@ import InputError from '@/components/input-error';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { show as albumShow } from '@/routes/albums';
+import { show as artistShow } from '@/routes/artists';
 import { catalog, index, match, show } from '@/routes/listens';
 
 type Listen = {
@@ -62,6 +64,8 @@ type Props = {
             origin: 'import' | 'manual' | 'local';
         }
     >;
+    matchedArtists: { mbid: string; name: string | null }[];
+    matchedAlbums: { mbid: string; name: string }[];
     suggestions: {
         recording_mbid: string;
         track_name: string;
@@ -97,6 +101,8 @@ export default function ListenDetails({
     catalogResult,
     catalogs,
     musicBrainzSeed,
+    matchedArtists,
+    matchedAlbums,
 }: Props) {
     const [selectedCatalog, setSelectedCatalog] = useState<'apple' | 'spotify'>(
         'apple',
@@ -137,9 +143,46 @@ export default function ListenDetails({
                         {listen.track_name}
                     </h1>
                     <p className="text-muted-foreground">
-                        {listen.artist_name}
-                        {listen.release_name ? ` · ${listen.release_name}` : ''}
+                        {matchedArtists.length === 1 ? (
+                            <Link
+                                className="underline"
+                                href={artistShow(matchedArtists[0].mbid)}
+                            >
+                                {listen.artist_name}
+                            </Link>
+                        ) : (
+                            listen.artist_name
+                        )}
+                        {listen.release_name && (
+                            <>
+                                {' · '}
+                                {matchedAlbums.length === 1 ? (
+                                    <Link
+                                        className="underline"
+                                        href={albumShow(matchedAlbums[0].mbid)}
+                                    >
+                                        {listen.release_name}
+                                    </Link>
+                                ) : (
+                                    listen.release_name
+                                )}
+                            </>
+                        )}
                     </p>
+                    {matchedArtists.length > 1 && (
+                        <div className="mt-2 flex flex-wrap gap-3 text-sm">
+                            {matchedArtists.map((artist, index) => (
+                                <Link
+                                    key={artist.mbid}
+                                    className="underline"
+                                    href={artistShow(artist.mbid)}
+                                >
+                                    {artist.name ??
+                                        `MusicBrainz artist ${index + 1}`}
+                                </Link>
+                            ))}
+                        </div>
+                    )}
                 </div>
                 {matchResult !== null && (
                     <p role="status" className="text-sm">

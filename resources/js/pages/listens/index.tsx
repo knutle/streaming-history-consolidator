@@ -3,6 +3,8 @@ import InputError from '@/components/input-error';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { show as albumShow } from '@/routes/albums';
+import { show as artistShow } from '@/routes/artists';
 import { index, show } from '@/routes/listens';
 import { edit as profileEdit } from '@/routes/profile';
 
@@ -15,6 +17,8 @@ type Listen = {
     source: 'spotify' | 'apple';
     played_ms: number;
     recording_mbid: string | null;
+    matched_artist_mbids: string[];
+    matched_album_mbids: string[];
 };
 
 type Props = {
@@ -193,10 +197,37 @@ export default function ListeningHistory({ listens, filters }: Props) {
                                             </Link>
                                         </td>
                                         <td className="p-2">
-                                            {listen.artist_name}
+                                            {listen.matched_artist_mbids
+                                                .length === 1 ? (
+                                                <Link
+                                                    className="underline"
+                                                    href={artistShow(
+                                                        listen
+                                                            .matched_artist_mbids[0],
+                                                    )}
+                                                >
+                                                    {listen.artist_name}
+                                                </Link>
+                                            ) : (
+                                                listen.artist_name
+                                            )}
                                         </td>
                                         <td className="p-2">
-                                            {listen.release_name ?? '—'}
+                                            {listen.release_name &&
+                                            listen.matched_album_mbids
+                                                .length === 1 ? (
+                                                <Link
+                                                    className="underline"
+                                                    href={albumShow(
+                                                        listen
+                                                            .matched_album_mbids[0],
+                                                    )}
+                                                >
+                                                    {listen.release_name}
+                                                </Link>
+                                            ) : (
+                                                (listen.release_name ?? '—')
+                                            )}
                                         </td>
                                         <td className="p-2">
                                             {listen.source === 'spotify'

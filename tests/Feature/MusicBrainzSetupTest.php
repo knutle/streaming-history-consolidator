@@ -12,6 +12,7 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\File;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Process;
+use Inertia\Testing\AssertableInertia;
 use Tests\TestCase;
 
 class MusicBrainzSetupTest extends TestCase
@@ -168,6 +169,7 @@ class MusicBrainzSetupTest extends TestCase
             ['11111111-1111-4111-8111-111111111111,aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'Artist & Guest', '44444444-4444-4444-8444-444444444444', 'Album, Deluxe', '22222222-2222-4222-8222-222222222222', 'Track'],
             ['11111111-1111-4111-8111-111111111111', 'Artist & Guest', '55555555-5555-4555-8555-555555555555', 'Other album', '66666666-6666-4666-8666-666666666666', 'Track'],
             ['11111111-1111-4111-8111-111111111111', 'Artist & Guest', '55555555-5555-4555-8555-555555555555', 'Other album', '77777777-7777-4777-8777-777777777777', 'Other track'],
+            ['bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', 'Ärtist', 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', 'Single album', 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', 'Single'],
         ]);
         Process::preventStrayProcesses();
         $this->artisan('musicbrainz:setup', ['--canonical-csv' => $this->csv])->assertSuccessful();
@@ -182,19 +184,33 @@ class MusicBrainzSetupTest extends TestCase
         DB::purge('musicbrainz');
         $row = [
             'ts' => '2024-01-01T12:00:00Z', 'ms_played' => 60000,
-            'master_metadata_track_name' => 'Track', 'master_metadata_album_artist_name' => 'Artist & Guest',
+            'master_metadata_track_name' => 'Track', 'master_metadata_album_artist_name' => 'artist & guest',
             'master_metadata_album_album_name' => 'Album, Deluxe',
         ];
         $this->actingAs(User::factory()->create())->post(route('listens.import'), [
             'source' => 'spotify', 'file' => UploadedFile::fake()->createWithContent('history.json', json_encode([$row], JSON_THROW_ON_ERROR)),
         ])->assertSessionHas('import_result', ['imported' => 1, 'duplicates' => 0, 'matched' => 1]);
         $metadata = Listen::query()->sole()->track_metadata;
+        $this->assertSame('artist & guest', $metadata['artist_name']);
         $this->assertSame('22222222-2222-4222-8222-222222222222', $metadata['additional_info']['recording_mbid']);
         $this->assertSame(['11111111-1111-4111-8111-111111111111', 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'], $metadata['additional_info']['artist_mbids']);
         $this->assertArrayNotHasKey('release_mbid', $metadata['additional_info']);
         $this->assertNull(app(MusicBrainzMatcher::class)->match('Track', 'Artist & Guest', ''));
         $this->assertNull(app(MusicBrainzMatcher::class)->match('Track', 'Artist & Guest', 'Wrong album'));
         $this->assertSame('55555555-5555-4555-8555-555555555555', app(MusicBrainzMatcher::class)->match('Other track', '', 'Other album')['release_mbid']);
+
+        $single = [...$row, 'ts' => '2024-01-03T12:00:00Z', 'master_metadata_track_name' => 'Single',
+            'master_metadata_album_artist_name' => 'ärtIST', 'master_metadata_album_album_name' => 'Single album'];
+        $this->post(route('listens.import'), [
+            'source' => 'spotify', 'file' => UploadedFile::fake()->createWithContent('history.json', json_encode([$single], JSON_THROW_ON_ERROR)),
+        ])->assertSessionHas('import_result', ['imported' => 1, 'duplicates' => 0, 'matched' => 1]);
+        $this->assertDatabaseHas('music_artists', [
+            'mbid' => 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', 'name' => 'Ärtist', 'name_source' => 'canonical_credit',
+        ]);
+        $this->assertDatabaseHas('music_releases', ['mbid' => 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', 'name' => 'Single album']);
+        $this->get(route('artists.show', 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'))
+            ->assertInertia(fn (AssertableInertia $page) => $page
+                ->where('entity.name', 'Ärtist')->where('entity.nameSource', 'canonical_credit'));
 
         $unmatched = [...$row, 'ts' => '2024-01-02T12:00:00Z', 'master_metadata_album_album_name' => 'Wrong album'];
         $this->post(route('listens.import'), [

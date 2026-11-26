@@ -35,16 +35,15 @@ export default function ImportHistory({
                 Upload Spotify extended history, an Apple Music Play Activity
                 CSV, or a full Apple Media Services ZIP. ZIP imports use
                 unambiguous library and daily track metadata to enrich plays.
-                Re-imports skip previously processed events. Apple playback
-                events are imported individually, not combined into sessions.
+                Re-imports skip previously processed events and can identify
+                previously unmatched listens. Apple playback events are imported
+                individually, not combined into sessions.
             </p>
             {!musicbrainzEnabled && (
                 <p className="text-sm text-amber-700 dark:text-amber-400">
                     MusicBrainz matching is disabled. Run{' '}
                     <code>php artisan musicbrainz:setup</code> locally or
-                    configure an existing database before importing. Previously
-                    CSV re-imports do not rematch existing listens; Apple ZIP
-                    imports can enrich and rematch previously unmatched listens.
+                    configure an existing database before importing.
                 </p>
             )}
             {importResult && (
@@ -120,7 +119,8 @@ export default function ImportHistory({
                 Maximum file size is 1 GB, subject to your server’s PHP upload
                 limits. Timestamp values without a timezone are interpreted as
                 UTC. Only music events with positive playback duration are
-                imported.
+                imported. MusicBrainz artist aliases require the full database;
+                the canonical CSV does not contain aliases.
             </p>
         </section>
     );
