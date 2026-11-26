@@ -21,6 +21,18 @@ class ManualMusicEntityMatcher
         ));
     }
 
+    public function artistMbid(User $user, string $artist): ?string
+    {
+        $key = hash('sha256', json_encode([$artist], JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE));
+        $cacheKey = $user->id.':artist:'.$key;
+        if (! array_key_exists($cacheKey, $this->cache)) {
+            $this->cache[$cacheKey] = DB::table('music_entity_matches')
+                ->where(['user_id' => $user->id, 'type' => 'artist', 'entity_key' => $key])->first();
+        }
+
+        return $this->cache[$cacheKey]?->mbid;
+    }
+
     /** @return Builder<Listen> */
     public function related(string $type, Listen $listen): Builder
     {
@@ -52,7 +64,7 @@ class ManualMusicEntityMatcher
         return $this->cache[$cacheKey];
     }
 
-    /** @param array{mbid: string, name: string, source: string}|null $musicbrainz */
+    /** @param array{mbid: string, name: string, source: string, aliases?: list<string>}|null $musicbrainz */
     public function remember(User $user, Listen $listen, string $type, ?array $musicbrainz = null, ?string $provider = null, ?string $catalogId = null): void
     {
         DB::transaction(function () use ($user, $listen, $type, $musicbrainz, $provider, $catalogId): void {
@@ -83,7 +95,20 @@ class ManualMusicEntityMatcher
                 if ($type === 'artist') {
                     $values['name_source'] = $musicbrainz['source'];
                 }
-                DB::table($table)->upsert([$values], ['mbid'], ['mbid']);
+                $updates = $musicbrainz['source'] === 'musicbrainz'
+                    ? ($type === 'artist' ? ['name', 'name_source'] : ['name'])
+                    : ['mbid'];
+                DB::table($table)->upsert([$values], ['mbid'], $updates);
+                if ($type === 'artist' && isset($musicbrainz['aliases'])) {
+                    $artist = DB::table('music_artists')->where('mbid', $musicbrainz['mbid'])->lockForUpdate()->first();
+                    $aliases = [];
+                    foreach ([$musicbrainz['name'], ...$musicbrainz['aliases']] as $name) {
+                        $key = ArtistAliases::key($name);
+                        $aliases[$key] = ['music_artist_id' => $artist->id, 'name' => $name, 'name_key' => $key];
+                    }
+                    DB::table('music_artist_aliases')->where('music_artist_id', $artist->id)->delete();
+                    DB::table('music_artist_aliases')->insert(array_values($aliases));
+                }
                 $this->related($type, $current)->chunkById(500, function ($listens): void {
                     foreach ($listens as $candidate) {
                         $this->apply($candidate);
@@ -106,6 +131,10 @@ class ManualMusicEntityMatcher
             if ($kind === 'musicbrainz') {
                 $row->mbid = null;
                 $row->name = null;
+                if ($type === 'artist') {
+                    DB::table('artist_recording_scans')->where('user_id', $user->id)->where('entity_key', $key['entity_key'])
+                        ->whereIn('status', ['queued', 'running'])->update(['status' => 'cancelled', 'updated_at' => now()]);
+                }
             } else {
                 unset($catalogs[$kind]);
             }

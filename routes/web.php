@@ -18,6 +18,8 @@ Route::middleware(['auth', 'verified'])->group(function () {
     Route::get('listens/{listen}', [ListenController::class, 'show'])->name('listens.show');
     Route::post('listens/{listen}/match', [ListenController::class, 'match'])->name('listens.match');
     Route::post('listens/{listen}/catalog', [ListenController::class, 'matchCatalog'])->name('listens.catalog');
+    Route::post('listens/{listen}/merge', [ListenController::class, 'merge'])->name('listens.merge');
+    Route::delete('listens/{listen}/merge/{member}', [ListenController::class, 'unlink'])->name('listens.unlink');
     Route::post('listens/{listen}/spotify-lookup', [ListenController::class, 'lookupSpotify'])->name('listens.spotify-lookup');
     Route::get('matches', [ManualMatchController::class, 'index'])->name('matches.index');
     Route::get('matches/recording/{match}/edit', [ManualMatchController::class, 'edit'])->name('matches.edit');

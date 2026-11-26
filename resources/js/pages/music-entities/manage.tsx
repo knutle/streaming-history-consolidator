@@ -1,4 +1,4 @@
-import { Form, Head, Link, usePage } from '@inertiajs/react';
+import { Form, Head, Link, usePage, usePoll } from '@inertiajs/react';
 import InputError from '@/components/input-error';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -29,11 +29,31 @@ type Props = {
     };
     search: string;
     searchPage: number;
+    searchSource: 'local' | 'api';
+    apiError: string | null;
     suggestions: { mbid: string; name: string; context: string | null }[];
     hasMore: boolean;
     musicbrainzEnabled: boolean;
     entityResult: string | null;
+    artistScan: {
+        status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
+        source: 'local' | 'api';
+        processed: number;
+        matched: number;
+        error: string | null;
+    } | null;
+    musicBrainzSeed: {
+        action: string;
+        method: 'get' | 'post';
+        fields: Record<string, string>;
+    } | null;
 };
+
+function PollArtistScan() {
+    usePoll(3000, { only: ['artistScan'] });
+
+    return null;
+}
 
 export default function ManageMusicEntity({
     type,
@@ -44,10 +64,14 @@ export default function ManageMusicEntity({
     listens,
     search,
     searchPage,
+    searchSource,
+    apiError,
     suggestions,
     hasMore,
     musicbrainzEnabled,
     entityResult,
+    artistScan,
+    musicBrainzSeed,
 }: Props) {
     const { errors } = usePage().props;
     const args = { type, listen: item.listen_id };
@@ -91,6 +115,25 @@ export default function ManageMusicEntity({
                         </p>
                     )}
                     <InputError message={errors.match} />
+                    {artistScan && (
+                        <div className="mt-2 text-sm" role="status">
+                            {(artistScan.status === 'queued' ||
+                                artistScan.status === 'running') && (
+                                <PollArtistScan />
+                            )}
+                            Artist recording scan: {artistScan.status} ·{' '}
+                            {artistScan.processed} checked ·{' '}
+                            {artistScan.matched} listens matched (
+                            {artistScan.source}).
+                            {artistScan.error && <p>{artistScan.error}</p>}
+                            {artistScan.status === 'queued' && (
+                                <p>
+                                    Requires the imports queue worker to be
+                                    running.
+                                </p>
+                            )}
+                        </div>
+                    )}
                 </div>
                 <section className="rounded-xl border p-4">
                     <h2 className="text-lg font-semibold">
@@ -150,14 +193,79 @@ export default function ManageMusicEntity({
                 </section>
                 <section className="rounded-xl border p-4">
                     <h2 className="text-lg font-semibold">Match MusicBrainz</h2>
+                    {musicBrainzSeed && (
+                        <div className="mt-3 text-sm">
+                            <form
+                                action={musicBrainzSeed.action}
+                                method={musicBrainzSeed.method}
+                                encType={
+                                    musicBrainzSeed.method === 'post'
+                                        ? 'multipart/form-data'
+                                        : undefined
+                                }
+                                target="_blank"
+                                rel="noreferrer"
+                            >
+                                {Object.entries(musicBrainzSeed.fields).map(
+                                    ([name, value]) => (
+                                        <input
+                                            key={name}
+                                            type="hidden"
+                                            name={name}
+                                            value={value}
+                                        />
+                                    ),
+                                )}
+                                <Button variant="outline" type="submit">
+                                    Open{' '}
+                                    {type === 'artist' ? 'artist' : 'release'}{' '}
+                                    editor with sources
+                                </Button>
+                            </form>
+                            <p className="mt-2 text-muted-foreground">
+                                This sends the imported name and any saved
+                                catalog links to MusicBrainz. They are
+                                unverified: check the sources and edit note,
+                                search for existing entries, and review names
+                                and artist credits against the{' '}
+                                <a
+                                    className="underline"
+                                    href="https://musicbrainz.org/doc/Style"
+                                    target="_blank"
+                                    rel="noreferrer"
+                                >
+                                    MusicBrainz style guidelines
+                                </a>{' '}
+                                before submitting. A combined artist credit may
+                                need to be split into individual artists. Sign
+                                in to MusicBrainz before opening the editor so
+                                the prefilled data is retained.
+                            </p>
+                        </div>
+                    )}
                     <p className="mt-1 text-sm text-muted-foreground">
                         Search the local MusicBrainz database by name prefix.
                         Album results show an associated artist credit; verify
                         the release before selecting it.
                     </p>
-                    {!musicbrainzEnabled && (
+                    <p className="mt-2 text-sm text-muted-foreground">
+                        API searches send the entered name to MusicBrainz.
+                        Selecting an API result also checks it online. Imports
+                        continue to use local matching.
+                    </p>
+                    {type === 'artist' && (
+                        <p className="mt-2 text-sm text-muted-foreground">
+                            Selecting an artist queues a scan of its unmatched
+                            listens. The local scan is offline. Choosing API
+                            fallback also sends unmatched track and album names
+                            to MusicBrainz; only unambiguous exact matches are
+                            applied.
+                        </p>
+                    )}
+                    {!musicbrainzEnabled && searchSource === 'local' && (
                         <p className="mt-2 text-sm">
-                            MusicBrainz is not enabled.
+                            Local MusicBrainz matching is disabled. Choose the
+                            MusicBrainz API to search online.
                         </p>
                     )}
                     <Form
@@ -165,24 +273,58 @@ export default function ManageMusicEntity({
                         className="mt-3 flex flex-wrap items-end gap-2"
                     >
                         <div className="grid gap-2">
-                            <Label htmlFor="q">Name prefix</Label>
+                            <Label htmlFor="q">
+                                Name (local search uses a prefix)
+                            </Label>
                             <Input
                                 id="q"
                                 name="q"
                                 defaultValue={search}
+                                maxLength={255}
                                 required
                             />
                         </div>
-                        <Button disabled={!musicbrainzEnabled}>Search</Button>
+                        <div className="grid gap-2">
+                            <Label htmlFor="entity-search-source">
+                                Search source
+                            </Label>
+                            <select
+                                key={searchSource}
+                                id="entity-search-source"
+                                name="search_source"
+                                defaultValue={searchSource}
+                                className="h-9 rounded-md border bg-background px-3 text-sm"
+                            >
+                                <option value="local">
+                                    Local MusicBrainz database
+                                </option>
+                                <option value="api">
+                                    MusicBrainz API (online)
+                                </option>
+                            </select>
+                        </div>
+                        <Button>Search</Button>
                     </Form>
                     <InputError message={errors.q} />
                     <InputError message={errors.mbid} />
                     <InputError message={errors.name} />
-                    {search && suggestions.length === 0 && (
-                        <p className="mt-3 text-sm text-muted-foreground">
-                            No results found.
+                    <InputError message={errors.page ?? errors.search_source} />
+                    {apiError && (
+                        <p
+                            role="alert"
+                            className="mt-2 text-sm text-destructive"
+                        >
+                            {apiError}
                         </p>
                     )}
+                    {search &&
+                        !apiError &&
+                        (musicbrainzEnabled || searchSource === 'api') &&
+                        suggestions.length === 0 && (
+                            <p className="mt-3 text-sm text-muted-foreground">
+                                No results found.
+                            </p>
+                        )}
                     <ul className="mt-3 divide-y">
                         {suggestions.map((suggestion) => (
                             <li
@@ -218,6 +360,30 @@ export default function ManageMusicEntity({
                                                 name="name"
                                                 value={suggestion.name}
                                             />
+                                            <input
+                                                type="hidden"
+                                                name="search_source"
+                                                value={searchSource}
+                                            />
+                                            {type === 'artist' && (
+                                                <label className="mr-2">
+                                                    <span className="sr-only">
+                                                        Recording scan source
+                                                    </span>
+                                                    <select
+                                                        name="scan_source"
+                                                        defaultValue="local"
+                                                        className="h-9 rounded-md border bg-background px-2 text-sm"
+                                                    >
+                                                        <option value="local">
+                                                            Local scan
+                                                        </option>
+                                                        <option value="api">
+                                                            Local + API scan
+                                                        </option>
+                                                    </select>
+                                                </label>
+                                            )}
                                             <Button
                                                 size="sm"
                                                 disabled={
@@ -237,7 +403,11 @@ export default function ManageMusicEntity({
                             <Link
                                 className="underline"
                                 href={manage(args, {
-                                    query: { q: search, page: searchPage - 1 },
+                                    query: {
+                                        q: search,
+                                        page: searchPage - 1,
+                                        search_source: searchSource,
+                                    },
                                 })}
                             >
                                 Previous results
@@ -247,7 +417,11 @@ export default function ManageMusicEntity({
                             <Link
                                 className="underline"
                                 href={manage(args, {
-                                    query: { q: search, page: searchPage + 1 },
+                                    query: {
+                                        q: search,
+                                        page: searchPage + 1,
+                                        search_source: searchSource,
+                                    },
                                 })}
                             >
                                 Next results

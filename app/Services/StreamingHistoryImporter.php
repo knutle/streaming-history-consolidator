@@ -14,11 +14,13 @@ class StreamingHistoryImporter
 {
     public function __construct(
         private StreamingHistoryReader $reader,
-        private MusicBrainzMatcher $matcher,
         private ManualListenMatcher $manualMatcher,
         private AppleMusicArchiveReader $archiveReader,
         private CatalogMatcher $catalogMatcher,
         private MatchedMusicMetadata $matchedMetadata,
+        private CatalogRecordingGroups $catalogGroups,
+        private ArtistAliases $artistAliases,
+        private ManualMusicEntityMatcher $manualEntities,
     ) {}
 
     /**
@@ -38,6 +40,7 @@ class StreamingHistoryImporter
             $counts = ['imported' => 0, 'duplicates' => 0, 'matched' => 0];
             $matches = [];
             $processed = 0;
+            $syncCatalogEvidence = false;
 
             $entries = $this->entries($path, $source, $archive, $checkAbort);
             foreach ($entries as $entry) {
@@ -68,16 +71,48 @@ class StreamingHistoryImporter
                     ];
                 $fingerprint = hash('sha256', json_encode($identityValues, JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE));
                 $identity = ['user_id' => $user->id, 'source' => $source, 'fingerprint' => $fingerprint];
+                $nativeId = $source === 'spotify'
+                    ? $this->catalogMatcher->identifier('spotify', $entry['uri'])
+                    : ($appleMusic['catalog_id'] ?? null);
+                if (! is_string($nativeId)) {
+                    $nativeId = null;
+                }
                 $existing = Listen::query()->where($identity)->first();
                 if ($existing !== null) {
                     if ($existing->track_name === $entry['track'] && ($existing->release_name ?? '') === $entry['album']) {
+                        $group = $this->catalogGroups->remembered($user->id, $source, $nativeId);
+                        if ($group !== null && $existing->recording_mbid !== null && $existing->recording_mbid !== $group['recording_mbid']) {
+                            throw ValidationException::withMessages([
+                                'file' => 'An existing listen conflicts with a linked catalog recording. Unlink or resolve the conflicting recording; nothing was imported.',
+                            ]);
+                        }
+                        if ($group !== null && $existing->recording_mbid === null) {
+                            $manual = $this->manualMatcher->remembered($user, $entry['track'], $entry['artist']);
+                            if ($manual !== null && $manual['recording_mbid'] !== $group['recording_mbid']) {
+                                throw ValidationException::withMessages([
+                                    'file' => 'A saved recording match conflicts with a linked catalog recording. Resolve the saved match or unlink the catalog item; nothing was imported.',
+                                ]);
+                            }
+                            $metadata = $existing->track_metadata;
+                            $metadata['additional_info']['recording_mbid'] = $group['recording_mbid'];
+                            if ($group['artist_mbids'] !== []) {
+                                $metadata['additional_info']['artist_mbids'] = $group['artist_mbids'];
+                            }
+                            $existing->update(['recording_mbid' => $group['recording_mbid'], 'track_metadata' => $metadata]);
+                        }
                         $this->enrichExisting($existing, $entry, $appleMusic, $user, $matches);
                     }
                     if ($existing->track_name === $entry['track'] && ($existing->release_name ?? '') === $entry['album']) {
                         $catalogs = $this->catalogMatcher->imported($user, $source, $entry['uri'], $appleMusic ?? [],
                             $entry['track'], $existing->artist_name, $entry['album'], $entry['duration_ms'], $entry['isrc'] ?? null);
+                        $syncCatalogEvidence = $syncCatalogEvidence || count($catalogs) > 1;
                         if ($catalogs !== []) {
                             $metadata = $existing->track_metadata;
+                            if (($metadata['additional_info']['catalogs'][$source]['origin'] ?? null) === 'manual'
+                                && ! isset($metadata['additional_info']['native_catalog'])
+                                && isset($catalogs[$source])) {
+                                $metadata['additional_info']['native_catalog'] = $catalogs[$source];
+                            }
                             $metadata['additional_info']['catalogs'] = $this->catalogMatcher->forListen($existing) + $catalogs;
                             $existing->update(['track_metadata' => $metadata]);
                         }
@@ -88,11 +123,19 @@ class StreamingHistoryImporter
                     continue;
                 }
 
-                $key = json_encode([$entry['track'], $entry['artist'], $entry['album']], JSON_THROW_ON_ERROR);
+                $key = json_encode([$entry['track'], $entry['artist'], $entry['album'], $source, $nativeId], JSON_THROW_ON_ERROR);
                 if (! array_key_exists($key, $matches)) {
                     try {
-                        $matches[$key] = $this->manualMatcher->remembered($user, $entry['track'], $entry['artist'])
-                            ?? $this->matcher->match($entry['track'], $entry['artist'], $entry['album']);
+                        $manual = $this->manualMatcher->remembered($user, $entry['track'], $entry['artist']);
+                        $group = $this->catalogGroups->remembered($user->id, $source, $nativeId);
+                        if ($manual !== null && $group !== null && $manual['recording_mbid'] !== $group['recording_mbid']) {
+                            throw ValidationException::withMessages([
+                                'file' => 'A saved recording match conflicts with a linked catalog recording. Resolve the saved match or unlink the catalog item; nothing was imported.',
+                            ]);
+                        }
+                        $matches[$key] = $group ?? $manual
+                            ?? $this->artistAliases->match($entry['track'], $entry['artist'], $entry['album'],
+                                $this->manualEntities->artistMbid($user, $entry['artist']));
                     } catch (QueryException $exception) {
                         report($exception);
 
@@ -123,6 +166,7 @@ class StreamingHistoryImporter
                 }
                 $catalogs = $this->catalogMatcher->imported($user, $source, $entry['uri'], $appleMusic ?? [],
                     $entry['track'], $artist, $entry['album'], $entry['duration_ms'], $entry['isrc'] ?? null);
+                $syncCatalogEvidence = $syncCatalogEvidence || count($catalogs) > 1;
                 if ($catalogs !== []) {
                     $additionalInfo['catalogs'] = $catalogs;
                 }
@@ -163,6 +207,9 @@ class StreamingHistoryImporter
                 }
             }
 
+            if ($syncCatalogEvidence) {
+                $this->catalogGroups->syncEvidence($user, $checkAbort);
+            }
             if ($progress !== null && $processed > 0) {
                 $progress($processed);
             }
@@ -228,7 +275,7 @@ class StreamingHistoryImporter
             if (! array_key_exists($key, $matches)) {
                 try {
                     $matches[$key] = $this->manualMatcher->remembered($user, $entry['track'], $artist)
-                        ?? $this->matcher->match($entry['track'], $artist, $entry['album']);
+                        ?? $this->artistAliases->match($entry['track'], $artist, $entry['album'], $this->manualEntities->artistMbid($user, $artist));
                 } catch (QueryException $exception) {
                     report($exception);
 

@@ -5,8 +5,10 @@ namespace App\Http\Controllers;
 use App\Http\Requests\ImportListensRequest;
 use App\Models\Listen;
 use App\Services\CatalogMatcher;
+use App\Services\CatalogRecordingGroups;
 use App\Services\Isrc;
 use App\Services\ManualListenMatcher;
+use App\Services\MusicBrainzApi;
 use App\Services\MusicBrainzMatcher;
 use App\Services\SpotifyCatalogLookup;
 use App\Services\StreamingHistoryImporter;
@@ -116,29 +118,78 @@ class ListenController extends Controller
         return to_route('listens.create')->with('import_result', $result);
     }
 
-    public function show(Request $request, int $listen, MusicBrainzMatcher $matcher, CatalogMatcher $catalogMatcher): Response
+    public function show(Request $request, int $listen, MusicBrainzMatcher $matcher, CatalogMatcher $catalogMatcher, CatalogRecordingGroups $groups, MusicBrainzApi $api): Response
     {
         $values = $request->validate([
             'q' => ['nullable', 'string', 'max:255'],
             'artist' => ['nullable', 'string', 'max:255'],
             'page' => ['nullable', 'integer', 'min:1', 'max:1000'],
+            'merge_q' => ['nullable', 'string', 'max:255'],
+            'search_source' => ['nullable', Rule::in(['local', 'api'])],
         ]);
         $item = Listen::query()->where('user_id', $request->user()->id)->findOrFail($listen);
         $search = $values['q'] ?? mb_substr($item->track_name, 0, 12);
         $artist = $values['artist'] ?? '';
         $page = (int) ($values['page'] ?? 1);
-        $candidates = $item->recording_mbid === null ? $matcher->search($search, $artist, $page) : ['results' => [], 'hasMore' => false];
+        $source = $values['search_source'] ?? 'local';
+        $candidates = ['results' => [], 'hasMore' => false];
+        $apiError = null;
+        if ($item->recording_mbid === null) {
+            if ($source === 'api') {
+                try {
+                    $candidates = $api->search($search, $artist, $page);
+                } catch (ValidationException $exception) {
+                    $apiError = $exception->errors()['musicbrainz_api'][0];
+                }
+            } else {
+                $candidates = $matcher->search($search, $artist, $page);
+            }
+        }
         $related = Listen::query()->where('user_id', $request->user()->id)
             ->where('id', '!=', $item->id)
             ->when($item->recording_mbid !== null,
                 fn ($query) => $query->where('recording_mbid', $item->recording_mbid),
                 fn ($query) => $query->where('track_name', $item->track_name)->where('artist_name', $item->artist_name))
             ->orderByDesc('listened_at')->limit(10)->get();
+        $members = $groups->members($item);
+        $linkedCatalogs = $groups->evidence($item);
+        $mergeSearch = trim($values['merge_q'] ?? '');
+        $mergeCandidates = [];
+        if ($mergeSearch !== '' && $groups->native($item) !== null) {
+            $pattern = '%'.str_replace(['!', '%', '_'], ['!!', '!%', '!_'], mb_strtolower($mergeSearch)).'%';
+            $seen = [];
+            $query = Listen::query()->where('user_id', $request->user()->id)->where('source', '!=', $item->source)
+                ->where(function ($query) use ($pattern): void {
+                    $query->whereRaw("LOWER(track_name) LIKE ? ESCAPE '!'", [$pattern])
+                        ->orWhereRaw("LOWER(artist_name) LIKE ? ESCAPE '!'", [$pattern])
+                        ->orWhereRaw("LOWER(release_name) LIKE ? ESCAPE '!'", [$pattern]);
+                })->orderByDesc('id');
+            foreach ($query->cursor() as $candidate) {
+                $catalog = $groups->native($candidate);
+                if ($catalog === null) {
+                    continue;
+                }
+                $key = $candidate->source.':'.$catalog['id'];
+                if (isset($seen[$key])) {
+                    continue;
+                }
+                $seen[$key] = true;
+                $mergeCandidates[] = ['id' => $candidate->id, 'source' => $candidate->source,
+                    'track_name' => $candidate->track_name, 'artist_name' => $candidate->artist_name,
+                    'release_name' => $candidate->release_name, 'recording_mbid' => $candidate->recording_mbid,
+                    'catalog_id' => $catalog['id']];
+                if (count($mergeCandidates) === 30) {
+                    break;
+                }
+            }
+        }
 
         return Inertia::render('listens/show', [
             'listen' => $item,
             'related' => $related,
             'musicbrainzEnabled' => (bool) config('musicbrainz.enabled'),
+            'searchSource' => $source,
+            'apiError' => $apiError,
             'search' => $search,
             'artistSearch' => $artist,
             'searchPage' => $page,
@@ -146,8 +197,14 @@ class ListenController extends Controller
             'suggestions' => $candidates['results'],
             'matchResult' => $request->session()->get('match_result'),
             'catalogResult' => $request->session()->get('catalog_result'),
+            'mergeResult' => $request->session()->get('merge_result'),
+            'mergeSearch' => $mergeSearch,
+            'mergeAvailable' => $groups->native($item) !== null,
+            'mergeCandidates' => $mergeCandidates,
+            'linkedCatalogs' => $members,
+            'linkedEvidence' => $linkedCatalogs,
             'catalogs' => $catalogMatcher->forListen($item, includeRelated: true),
-            'musicBrainzSeed' => $item->recording_mbid === null ? $catalogMatcher->musicBrainzSeed($item) : null,
+            'musicBrainzSeed' => $item->recording_mbid === null ? $catalogMatcher->musicBrainzSeed($item, $linkedCatalogs) : null,
             'matchedArtists' => DB::table('music_artists')
                 ->join('listen_artists', 'listen_artists.music_artist_id', '=', 'music_artists.id')
                 ->where('listen_artists.listen_id', $item->id)->orderBy('music_artists.id')
@@ -159,7 +216,25 @@ class ListenController extends Controller
         ]);
     }
 
-    public function matchCatalog(Request $request, int $listen, CatalogMatcher $matcher): RedirectResponse
+    public function merge(Request $request, int $listen, CatalogRecordingGroups $groups): RedirectResponse
+    {
+        $item = Listen::query()->where('user_id', $request->user()->id)->findOrFail($listen);
+        $values = $request->validate(['other_listen' => ['required', 'integer', 'min:1']]);
+        $other = Listen::query()->where('user_id', $request->user()->id)->whereKey($values['other_listen'])->firstOrFail();
+        $groups->merge($request->user(), $item, $other);
+
+        return to_route('listens.show', $listen)->with('merge_result', 'Catalog items linked. Listening events remain separate.');
+    }
+
+    public function unlink(Request $request, int $listen, int $member, CatalogRecordingGroups $groups): RedirectResponse
+    {
+        $item = Listen::query()->where('user_id', $request->user()->id)->findOrFail($listen);
+        $groups->unlink($request->user(), $item, $member);
+
+        return to_route('listens.show', $listen)->with('merge_result', 'Catalog item unlinked. Existing listening events and MusicBrainz matches were not changed.');
+    }
+
+    public function matchCatalog(Request $request, int $listen, CatalogMatcher $matcher, CatalogRecordingGroups $groups): RedirectResponse
     {
         $item = Listen::query()->where('user_id', $request->user()->id)->findOrFail($listen);
         $values = $request->validate([
@@ -182,7 +257,12 @@ class ListenController extends Controller
         $match = $matcher->match($values['provider'], $id, $values['catalog_track'], $values['catalog_artist'],
             $values['catalog_album'] ?? null, isset($values['catalog_duration']) ? (int) $values['catalog_duration'] : null, 'manual',
             isset($values['catalog_isrc']) ? Isrc::normalize($values['catalog_isrc']) : null);
-        $count = $matcher->remember($request->user(), $item, $match);
+        $count = DB::transaction(function () use ($matcher, $request, $item, $match, $groups) {
+            $count = $matcher->remember($request->user(), $item, $match);
+            $groups->syncEvidence($request->user());
+
+            return $count;
+        });
 
         return to_route('listens.show', $item->id)->with('catalog_result', $count);
     }
@@ -199,15 +279,18 @@ class ListenController extends Controller
         return response()->json($lookup->track($id));
     }
 
-    public function match(Request $request, int $listen, MusicBrainzMatcher $matcher, ManualListenMatcher $manualMatcher): RedirectResponse
+    public function match(Request $request, int $listen, MusicBrainzMatcher $matcher, ManualListenMatcher $manualMatcher, MusicBrainzApi $api): RedirectResponse
     {
         $item = Listen::query()->where('user_id', $request->user()->id)->whereNull('recording_mbid')->findOrFail($listen);
         $values = $request->validate([
             'recording_mbid' => ['required', 'uuid'],
             'track_name' => ['required', 'string', 'max:255'],
             'artist_name' => ['required', 'string', 'max:255'],
+            'search_source' => ['nullable', Rule::in(['local', 'api'])],
         ]);
-        $match = $matcher->recording($values['recording_mbid'], $values['track_name'], $values['artist_name']);
+        $match = ($values['search_source'] ?? 'local') === 'api'
+            ? $api->recording($values['recording_mbid'], $values['track_name'], $values['artist_name'])
+            : $matcher->recording($values['recording_mbid'], $values['track_name'], $values['artist_name']);
         if ($match === null) {
             throw ValidationException::withMessages(['recording_mbid' => 'The selected recording is unavailable in the local MusicBrainz database.']);
         }

@@ -85,7 +85,7 @@ class CatalogMatcher
     /** @param array<string, mixed> $match
      * @return array<string, mixed>
      */
-    private function withMetadata(int $userId, array $match): array
+    public function withMetadata(int $userId, array $match): array
     {
         $key = hash('sha256', $match['provider'].':'.$match['id']);
         $cacheKey = $userId.':'.$key;
@@ -259,16 +259,32 @@ class CatalogMatcher
         return $catalogs;
     }
 
-    public function musicBrainzSeed(Listen $listen): ?string
+    /** @param list<array<string, mixed>> $linkedCatalogs */
+    public function musicBrainzSeed(Listen $listen, array $linkedCatalogs = []): ?string
     {
-        $catalogs = $this->forListen($listen, includeRelated: true);
+        $catalogs = array_values($this->forListen($listen, includeRelated: true));
+        $seen = [];
+        foreach ($catalogs as $catalog) {
+            $seen[$catalog['provider'].':'.$catalog['id']] = true;
+        }
+        foreach ($linkedCatalogs as $catalog) {
+            $key = $catalog['provider'].':'.$catalog['id'];
+            if (! isset($seen[$key])) {
+                $catalogs[] = $catalog;
+                $seen[$key] = true;
+            }
+        }
         if ($catalogs === []) {
             return null;
         }
-        $match = $catalogs['apple'] ?? $catalogs['spotify'] ?? null;
-        if (! is_array($match)) {
-            return null;
+        $match = null;
+        foreach ($catalogs as $catalog) {
+            if (($catalog['provider'] ?? null) === 'apple') {
+                $match = $catalog;
+                break;
+            }
         }
+        $match ??= $catalogs[0];
         $params = [];
         $title = $match['track_name'] ?? null;
         $titlesAgree = is_string($title) && trim($title) !== '';
@@ -280,7 +296,7 @@ class CatalogMatcher
         }
         if ($titlesAgree) {
             $params['edit-recording.name'] = $title;
-            foreach ([$match, ...array_values($catalogs)] as $catalog) {
+            foreach ([$match, ...$catalogs] as $catalog) {
                 $artist = $catalog['artist_name'] ?? null;
                 if (is_string($artist) && trim($artist) !== '' && $artist !== 'Unknown artist') {
                     $params['edit-recording.artist_credit.names.0.name'] = $artist;
@@ -296,9 +312,9 @@ class CatalogMatcher
             }
         }
         $sources = [];
-        foreach (['apple', 'spotify'] as $provider) {
-            if (isset($catalogs[$provider]['id']) && is_string($catalogs[$provider]['id'])) {
-                $catalog = $catalogs[$provider];
+        foreach ($catalogs as $catalog) {
+            $provider = $catalog['provider'] ?? null;
+            if (in_array($provider, ['apple', 'spotify'], true) && isset($catalog['id']) && is_string($catalog['id'])) {
                 $name = $provider === 'apple' ? 'Apple Music' : 'Spotify';
                 $source = [$name.': '.$this->url($provider, $catalog['id'])];
                 foreach (['track_name' => 'Track', 'artist_name' => 'Artist', 'release_name' => 'Album', 'isrc' => 'ISRC'] as $field => $label) {
@@ -317,6 +333,71 @@ class CatalogMatcher
             .implode("\n\n", $sources);
 
         return 'https://musicbrainz.org/recording/create?'.http_build_query($params, '', '&', PHP_QUERY_RFC3986);
+    }
+
+    /**
+     * @param  array<string, string>  $catalogs
+     * @param  list<array<string, mixed>>  $linkedCatalogs
+     * @return array{action: string, method: 'get'|'post', fields: array<string, string>}|null
+     */
+    public function musicBrainzEntitySeed(string $type, Listen $listen, array $catalogs, array $linkedCatalogs = []): ?array
+    {
+        $artist = trim($listen->artist_name) !== '' && $listen->artist_name !== 'Unknown artist'
+            ? $listen->artist_name : null;
+        if ($type === 'artist' && $artist === null) {
+            return null;
+        }
+        if ($type === 'album' && trim($listen->release_name ?? '') === '') {
+            return null;
+        }
+
+        $sources = [];
+        if ($artist !== null) {
+            $sources[] = 'Imported artist credit: '.$artist;
+        }
+        if ($type === 'album') {
+            $sources[] = 'Imported album: '.$listen->release_name;
+        }
+        foreach (['apple', 'spotify'] as $provider) {
+            if (isset($catalogs[$provider])) {
+                $id = rawurlencode($catalogs[$provider]);
+                $name = $provider === 'apple' ? 'Apple Music' : 'Spotify';
+                $url = $provider === 'apple'
+                    ? "https://music.apple.com/{$type}/{$id}"
+                    : "https://open.spotify.com/{$type}/{$id}";
+                $sources[] = "{$name}: {$url}";
+            }
+        }
+        foreach ($linkedCatalogs as $catalog) {
+            $provider = $catalog['provider'] ?? null;
+            $id = $catalog['id'] ?? null;
+            if (! in_array($provider, ['apple', 'spotify'], true) || ! is_string($id)) {
+                continue;
+            }
+            $source = ['Linked track to verify: '.$this->url($provider, $id)];
+            foreach (['track_name' => 'Track', 'artist_name' => 'Artist', 'release_name' => 'Album', 'isrc' => 'ISRC'] as $field => $label) {
+                if (is_string($catalog[$field] ?? null) && trim($catalog[$field]) !== '') {
+                    $source[] = "{$label}: ".$catalog[$field];
+                }
+            }
+            $sources[] = implode("\n", $source);
+        }
+        $note = "Imported information and catalog links to verify (catalog links may be user-supplied; confirm they refer to the same entity):\n\n"
+            .implode("\n", $sources);
+
+        if ($type === 'artist') {
+            return [
+                'action' => 'https://musicbrainz.org/artist/create', 'method' => 'get',
+                'fields' => ['edit-artist.name' => $artist, 'edit-artist.edit_note' => $note],
+            ];
+        }
+        $fields = ['name' => $listen->release_name, 'edit_note' => $note];
+        if ($artist !== null) {
+            $fields['artist_credit.names.0.name'] = $artist;
+            $fields['artist_credit.names.0.artist.name'] = $artist;
+        }
+
+        return ['action' => 'https://musicbrainz.org/release/add', 'method' => 'post', 'fields' => $fields];
     }
 
     /** @param array<string, mixed> $match */
@@ -357,6 +438,11 @@ class CatalogMatcher
                         if ($candidate->id !== $current->id && isset($catalogs[$match['provider']])
                             && ($catalogs[$match['provider']]['origin'] ?? null) !== 'manual') {
                             continue;
+                        }
+                        if ($candidate->source === $match['provider']
+                            && ! isset($metadata['additional_info']['native_catalog'])
+                            && ($catalogs[$candidate->source]['origin'] ?? null) === 'import') {
+                            $metadata['additional_info']['native_catalog'] = $catalogs[$candidate->source];
                         }
                         $catalogs[$match['provider']] = $match;
                         $metadata['additional_info']['catalogs'] = $catalogs;

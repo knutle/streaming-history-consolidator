@@ -6,6 +6,7 @@ import { Label } from '@/components/ui/label';
 import { show as albumShow } from '@/routes/albums';
 import { show as artistShow } from '@/routes/artists';
 import { index, show } from '@/routes/listens';
+import { manage as manageEntity } from '@/routes/music-entities';
 import { index as importsIndex } from '@/routes/imports';
 
 type Listen = {
@@ -208,12 +209,23 @@ export default function ListeningHistory({ listens, filters }: Props) {
                                                 >
                                                     {listen.artist_name}
                                                 </Link>
+                                            ) : listen.matched_artist_mbids
+                                                  .length === 0 ? (
+                                                <Link
+                                                    className="underline"
+                                                    href={manageEntity({
+                                                        type: 'artist',
+                                                        listen: listen.id,
+                                                    })}
+                                                >
+                                                    {listen.artist_name}
+                                                </Link>
                                             ) : (
                                                 listen.artist_name
                                             )}
                                         </td>
                                         <td className="p-2">
-                                            {listen.release_name &&
+                                            {listen.release_name?.trim() &&
                                             listen.matched_album_mbids
                                                 .length === 1 ? (
                                                 <Link
@@ -222,6 +234,18 @@ export default function ListeningHistory({ listens, filters }: Props) {
                                                         listen
                                                             .matched_album_mbids[0],
                                                     )}
+                                                >
+                                                    {listen.release_name}
+                                                </Link>
+                                            ) : listen.release_name?.trim() &&
+                                              listen.matched_album_mbids
+                                                  .length === 0 ? (
+                                                <Link
+                                                    className="underline"
+                                                    href={manageEntity({
+                                                        type: 'album',
+                                                        listen: listen.id,
+                                                    })}
                                                 >
                                                     {listen.release_name}
                                                 </Link>

@@ -8,6 +8,7 @@ use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Schema;
 use Inertia\Testing\AssertableInertia as Assert;
 use Tests\TestCase;
@@ -220,5 +221,61 @@ class MusicEntityTest extends TestCase
         $this->database();
         $this->get(route('music-entities.manage', ['type' => 'album', 'listen' => $listen->id, 'q' => 'Album']))
             ->assertInertia(fn (Assert $page) => $page->where('suggestions.0.mbid', self::ALBUM)->where('suggestions.0.context', 'Artist'));
+    }
+
+    public function test_artist_and_release_editors_are_seeded_with_unverified_names_and_user_catalog_links(): void
+    {
+        config(['musicbrainz.enabled' => false]);
+        Http::preventStrayRequests();
+        $user = User::factory()->create();
+        $otherUser = User::factory()->create();
+        $listen = $this->listen($user, 'Artist & Guest', 'Album: Live');
+        $other = $this->listen($otherUser, 'Artist & Guest', 'Album: Live');
+        $this->actingAs($user);
+        $this->post(route('music-entities.catalog', ['type' => 'artist', 'listen' => $listen->id]), [
+            'provider' => 'spotify', 'catalog_url' => 'spotify:artist:1234567890123456789012',
+        ])->assertSessionHasNoErrors();
+        $this->post(route('music-entities.catalog', ['type' => 'album', 'listen' => $listen->id]), [
+            'provider' => 'apple', 'catalog_url' => 'https://music.apple.com/us/album/album/123',
+        ])->assertSessionHasNoErrors();
+        $this->actingAs($otherUser)
+            ->post(route('music-entities.catalog', ['type' => 'album', 'listen' => $other->id]), [
+                'provider' => 'apple', 'catalog_url' => 'https://music.apple.com/us/album/album/456',
+            ])->assertSessionHasNoErrors();
+
+        $this->actingAs($user)->get(route('music-entities.manage', ['type' => 'artist', 'listen' => $listen->id]))
+            ->assertOk()->assertInertia(fn (Assert $page) => $page
+            ->where('musicBrainzSeed.action', 'https://musicbrainz.org/artist/create')
+            ->where('musicBrainzSeed.method', 'get')
+            ->where('musicBrainzSeed.fields', fn ($fields) => $fields['edit-artist.name'] === 'Artist & Guest'
+                && str_contains($fields['edit-artist.edit_note'], 'https://open.spotify.com/artist/1234567890123456789012')
+                && ! isset($fields['edit-artist.sort_name'])));
+        $this->get(route('music-entities.manage', ['type' => 'album', 'listen' => $listen->id]))
+            ->assertOk()->assertInertia(fn (Assert $page) => $page
+            ->where('musicBrainzSeed.action', 'https://musicbrainz.org/release/add')
+            ->where('musicBrainzSeed.method', 'post')
+            ->where('musicBrainzSeed.fields', fn ($fields) => $fields['name'] === 'Album: Live'
+                && $fields['artist_credit.names.0.name'] === 'Artist & Guest'
+                && $fields['artist_credit.names.0.artist.name'] === 'Artist & Guest'
+                && str_contains($fields['edit_note'], 'https://music.apple.com/album/123')
+                && ! str_contains($fields['edit_note'], 'album/456')
+                && ! isset($fields['type']) && ! isset($fields['status'])));
+        Http::assertNothingSent();
+    }
+
+    public function test_editors_do_not_seed_unknown_artist_names_or_empty_album_names(): void
+    {
+        config(['musicbrainz.enabled' => false]);
+        $user = User::factory()->create();
+        $listen = $this->listen($user, 'Unknown artist');
+        $emptyAlbum = $this->listen($user, 'Artist', ' ');
+        $this->actingAs($user)
+            ->get(route('music-entities.manage', ['type' => 'artist', 'listen' => $listen->id]))
+            ->assertInertia(fn (Assert $page) => $page->where('musicBrainzSeed', null));
+        $this->get(route('music-entities.manage', ['type' => 'album', 'listen' => $listen->id]))
+            ->assertInertia(fn (Assert $page) => $page->where('musicBrainzSeed.fields', fn ($fields) => $fields['name'] === 'Album'
+                && ! isset($fields['artist_credit.names.0.name'])
+                && ! str_contains($fields['edit_note'], 'Unknown artist')));
+        $this->get(route('music-entities.manage', ['type' => 'album', 'listen' => $emptyAlbum->id]))->assertNotFound();
     }
 }

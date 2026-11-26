@@ -6,7 +6,16 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { show as albumShow } from '@/routes/albums';
 import { show as artistShow } from '@/routes/artists';
-import { catalog, index, match, show, spotifyLookup } from '@/routes/listens';
+import {
+    catalog,
+    index,
+    match,
+    merge,
+    show,
+    spotifyLookup,
+    unlink,
+} from '@/routes/listens';
+import { manage as manageEntity } from '@/routes/music-entities';
 
 type SpotifyMetadata = {
     track_name: string;
@@ -15,6 +24,21 @@ type SpotifyMetadata = {
     duration_ms: number | null;
     isrc: string | null;
     url: string;
+};
+
+type CatalogMetadata = {
+    id: string;
+    track_name: string;
+    artist_name: string;
+    release_name: string | null;
+    duration_ms: number | null;
+    isrc?: string | null;
+    album_artist?: string;
+    genre?: string;
+    release_date?: string;
+    track_number?: number;
+    disc_number?: number;
+    origin: 'import' | 'manual' | 'local';
 };
 
 type Listen = {
@@ -74,30 +98,40 @@ type Props = {
     listen: Listen;
     related: Listen[];
     musicbrainzEnabled: boolean;
+    searchSource: 'local' | 'api';
+    apiError: string | null;
     search: string;
     artistSearch: string;
     searchPage: number;
     hasMore: boolean;
     matchResult: number | null;
     catalogResult: number | null;
-    musicBrainzSeed: string | null;
-    catalogs: Record<
-        string,
-        {
+    mergeResult: string | null;
+    mergeSearch: string;
+    mergeAvailable: boolean;
+    mergeCandidates: {
+        id: number;
+        source: 'apple' | 'spotify';
+        track_name: string;
+        artist_name: string;
+        release_name: string | null;
+        recording_mbid: string | null;
+        catalog_id: string;
+    }[];
+    linkedCatalogs: {
+        id: number;
+        catalog: {
+            provider: 'apple' | 'spotify';
             id: string;
             track_name: string;
             artist_name: string;
             release_name: string | null;
-            duration_ms: number | null;
-            isrc?: string | null;
-            album_artist?: string;
-            genre?: string;
-            release_date?: string;
-            track_number?: number;
-            disc_number?: number;
-            origin: 'import' | 'manual' | 'local';
-        }
-    >;
+            isrc: string | null;
+        };
+    }[];
+    linkedEvidence: (CatalogMetadata & { provider: 'apple' | 'spotify' })[];
+    musicBrainzSeed: string | null;
+    catalogs: Partial<Record<'apple' | 'spotify', CatalogMetadata>>;
     matchedArtists: { mbid: string; name: string | null }[];
     matchedAlbums: { mbid: string; name: string }[];
     suggestions: {
@@ -126,6 +160,8 @@ export default function ListenDetails({
     listen,
     related,
     musicbrainzEnabled,
+    searchSource,
+    apiError,
     search,
     artistSearch,
     searchPage,
@@ -133,6 +169,12 @@ export default function ListenDetails({
     suggestions,
     matchResult,
     catalogResult,
+    mergeResult,
+    mergeSearch,
+    mergeAvailable,
+    mergeCandidates,
+    linkedCatalogs,
+    linkedEvidence,
     catalogs,
     musicBrainzSeed,
     matchedArtists,
@@ -141,6 +183,11 @@ export default function ListenDetails({
     const [selectedCatalog, setSelectedCatalog] = useState<'apple' | 'spotify'>(
         'apple',
     );
+    const [selectedLinkedCatalog, setSelectedLinkedCatalog] = useState<{
+        listenId: number;
+        provider: 'apple' | 'spotify';
+        id: string;
+    } | null>(null);
     const lookup = useHttp<{ catalog_url: string }, SpotifyMetadata>({
         catalog_url: '',
     });
@@ -153,6 +200,7 @@ export default function ListenDetails({
         url: string;
     } | null>(null);
     const catalogUrlInput = useRef<HTMLInputElement>(null);
+    const recordingSearchInput = useRef<HTMLInputElement>(null);
     const trackInput = useRef<HTMLInputElement>(null);
     const artistInput = useRef<HTMLInputElement>(null);
     const albumInput = useRef<HTMLInputElement>(null);
@@ -212,6 +260,14 @@ export default function ListenDetails({
         }
     }
     const { errors } = usePage().props;
+    const additionalEvidence = linkedEvidence.filter(
+        (item) =>
+            !linkedCatalogs.some(
+                ({ catalog }) =>
+                    catalog.provider === item.provider &&
+                    catalog.id === item.id,
+            ),
+    );
     const info = listen.track_metadata.additional_info;
     const apple = info.apple_music;
     const appleDetails = [
@@ -260,8 +316,27 @@ export default function ListenDetails({
     const musicSearch = encodeURIComponent(
         `${listen.track_name} ${listen.artist_name}`,
     );
-    const catalogMatch = catalogs[selectedCatalog];
-    const inputKey = `${listen.id}-${selectedCatalog}`;
+    const currentMatch = catalogs[selectedCatalog];
+    const linkedMatches = linkedEvidence.filter(
+        (item) => item.provider === selectedCatalog,
+    );
+    const chooseLinked =
+        (!currentMatch || currentMatch.origin === 'local') &&
+        linkedMatches.length > 1;
+    const selectedLinked =
+        selectedLinkedCatalog?.listenId === listen.id &&
+        selectedLinkedCatalog.provider === selectedCatalog
+            ? linkedMatches.find((item) => item.id === selectedLinkedCatalog.id)
+            : undefined;
+    const catalogMatch =
+        currentMatch && currentMatch.origin !== 'local'
+            ? currentMatch
+            : linkedMatches.length === 1
+              ? linkedMatches[0]
+              : chooseLinked
+                ? selectedLinked
+                : currentMatch;
+    const inputKey = JSON.stringify([listen.id, selectedCatalog, catalogMatch]);
 
     return (
         <>
@@ -282,16 +357,36 @@ export default function ListenDetails({
                             >
                                 {listen.artist_name}
                             </Link>
+                        ) : matchedArtists.length === 0 ? (
+                            <Link
+                                className="underline"
+                                href={manageEntity({
+                                    type: 'artist',
+                                    listen: listen.id,
+                                })}
+                            >
+                                {listen.artist_name}
+                            </Link>
                         ) : (
                             listen.artist_name
                         )}
-                        {listen.release_name && (
+                        {listen.release_name?.trim() && (
                             <>
                                 {' · '}
                                 {matchedAlbums.length === 1 ? (
                                     <Link
                                         className="underline"
                                         href={albumShow(matchedAlbums[0].mbid)}
+                                    >
+                                        {listen.release_name}
+                                    </Link>
+                                ) : matchedAlbums.length === 0 ? (
+                                    <Link
+                                        className="underline"
+                                        href={manageEntity({
+                                            type: 'album',
+                                            listen: listen.id,
+                                        })}
                                     >
                                         {listen.release_name}
                                     </Link>
@@ -325,6 +420,11 @@ export default function ListenDetails({
                 {catalogResult !== null && (
                     <p role="status" className="text-sm">
                         Catalog match saved for {catalogResult} listens.
+                    </p>
+                )}
+                {mergeResult && (
+                    <p role="status" className="text-sm">
+                        {mergeResult}
                     </p>
                 )}
                 <section className="rounded-xl border p-5">
@@ -437,6 +537,218 @@ export default function ListenDetails({
                     </div>
                 </section>
                 <section className="rounded-xl border p-5">
+                    <h2 className="text-lg font-semibold">
+                        Link recordings across catalogs
+                    </h2>
+                    <p className="mt-2 text-sm text-muted-foreground">
+                        Link catalog tracks only when they represent the same
+                        recording. Plays stay separate. A MusicBrainz recording
+                        match is shared with linked tracks and future imports;
+                        conflicting matches must be resolved first. Removing a
+                        link does not undo matches.
+                    </p>
+                    <InputError
+                        message={
+                            errors.merge ??
+                            errors.other_listen ??
+                            errors.merge_q
+                        }
+                    />
+                    {linkedCatalogs.length > 0 && (
+                        <ul className="mt-4 space-y-3">
+                            {linkedCatalogs.map(({ id, catalog: item }) => (
+                                <li
+                                    key={id}
+                                    className="flex flex-wrap items-center justify-between gap-3 border-b pb-3 text-sm"
+                                >
+                                    <div>
+                                        <a
+                                            className="font-medium underline"
+                                            href={catalogUrl(
+                                                item.provider,
+                                                item.id,
+                                            )}
+                                            target="_blank"
+                                            rel="noreferrer"
+                                        >
+                                            {item.provider === 'apple'
+                                                ? 'Apple Music'
+                                                : 'Spotify'}
+                                            : {item.track_name}
+                                        </a>
+                                        <p>
+                                            {item.artist_name}
+                                            {item.release_name
+                                                ? ` — ${item.release_name}`
+                                                : ''}
+                                        </p>
+                                        {item.isrc && <p>ISRC: {item.isrc}</p>}
+                                    </div>
+                                    <Form
+                                        {...unlink.form({
+                                            listen: listen.id,
+                                            member: id,
+                                        })}
+                                        onSubmit={(event) => {
+                                            if (
+                                                !window.confirm(
+                                                    'Unlink this catalog track? Existing matches and listening events will remain.',
+                                                )
+                                            )
+                                                event.preventDefault();
+                                        }}
+                                    >
+                                        {({ processing }) => (
+                                            <Button
+                                                variant="outline"
+                                                type="submit"
+                                                disabled={processing}
+                                            >
+                                                Unlink
+                                            </Button>
+                                        )}
+                                    </Form>
+                                </li>
+                            ))}
+                        </ul>
+                    )}
+                    {additionalEvidence.length > 0 && (
+                        <div className="mt-4">
+                            <h3 className="font-medium">
+                                Other catalog matches from linked listens
+                            </h3>
+                            <p className="mt-1 text-sm text-muted-foreground">
+                                These saved matches are evidence to review; they
+                                are not linked listening sources. Unlinking a
+                                source removes evidence contributed only by that
+                                source.
+                            </p>
+                            <ul className="mt-2 space-y-2 text-sm">
+                                {additionalEvidence.map((item) => (
+                                    <li key={`${item.provider}:${item.id}`}>
+                                        <a
+                                            className="underline"
+                                            href={catalogUrl(
+                                                item.provider,
+                                                item.id,
+                                            )}
+                                            target="_blank"
+                                            rel="noreferrer"
+                                        >
+                                            {item.provider === 'apple'
+                                                ? 'Apple Music'
+                                                : 'Spotify'}
+                                            : {item.track_name}
+                                        </a>
+                                        <p>
+                                            {item.artist_name}
+                                            {item.release_name
+                                                ? ` — ${item.release_name}`
+                                                : ''}
+                                            {item.isrc
+                                                ? ` · ISRC ${item.isrc}`
+                                                : ''}
+                                        </p>
+                                    </li>
+                                ))}
+                            </ul>
+                        </div>
+                    )}
+                    {mergeAvailable ? (
+                        <>
+                            <Form
+                                {...show.form(listen.id)}
+                                className="mt-4 flex flex-wrap items-end gap-2"
+                            >
+                                <div className="grid gap-1">
+                                    <Label htmlFor="merge_q">
+                                        Search your other catalog
+                                    </Label>
+                                    <Input
+                                        id="merge_q"
+                                        name="merge_q"
+                                        defaultValue={mergeSearch}
+                                        maxLength={255}
+                                        required
+                                    />
+                                </div>
+                                <Button type="submit" variant="outline">
+                                    Search
+                                </Button>
+                            </Form>
+                            {mergeSearch && mergeCandidates.length === 0 && (
+                                <p className="mt-3 text-sm">
+                                    No matching catalog tracks found.
+                                </p>
+                            )}
+                            <ul className="mt-4 space-y-3">
+                                {mergeCandidates.map((candidate) => (
+                                    <li
+                                        key={candidate.id}
+                                        className="flex flex-wrap items-center justify-between gap-3 border-b pb-3 text-sm"
+                                    >
+                                        <div>
+                                            <Link
+                                                className="font-medium underline"
+                                                href={show(candidate.id)}
+                                            >
+                                                {candidate.track_name}
+                                            </Link>
+                                            <p>
+                                                {candidate.artist_name}
+                                                {candidate.release_name
+                                                    ? ` — ${candidate.release_name}`
+                                                    : ''}
+                                            </p>
+                                            <p className="text-muted-foreground">
+                                                {candidate.source === 'apple'
+                                                    ? 'Apple Music'
+                                                    : 'Spotify'}{' '}
+                                                · {candidate.catalog_id}
+                                                {candidate.recording_mbid
+                                                    ? ` · MusicBrainz ${candidate.recording_mbid}`
+                                                    : ''}
+                                            </p>
+                                        </div>
+                                        <Form
+                                            {...merge.form(listen.id)}
+                                            onSubmit={(event) => {
+                                                if (
+                                                    !window.confirm(
+                                                        'Link these catalog tracks as the same recording? Existing MusicBrainz matches may be applied to unmatched plays.',
+                                                    )
+                                                )
+                                                    event.preventDefault();
+                                            }}
+                                        >
+                                            {({ processing }) => (
+                                                <>
+                                                    <input
+                                                        type="hidden"
+                                                        name="other_listen"
+                                                        value={candidate.id}
+                                                    />
+                                                    <Button
+                                                        type="submit"
+                                                        disabled={processing}
+                                                    >
+                                                        Link tracks
+                                                    </Button>
+                                                </>
+                                            )}
+                                        </Form>
+                                    </li>
+                                ))}
+                            </ul>
+                        </>
+                    ) : (
+                        <p className="mt-4 text-sm">
+                            This listen has no usable source catalog track
+                            identifier, so it cannot be linked.
+                        </p>
+                    )}
+                </section>
+                <section className="rounded-xl border p-5">
                     <h2 className="text-lg font-semibold">Catalog matches</h2>
                     <p className="mt-2 text-sm text-muted-foreground">
                         Search a catalog, copy the track link, and confirm its
@@ -446,7 +758,9 @@ export default function ListenDetails({
                         can also be linked through the same MusicBrainz
                         recording. Manual choices are remembered for the same
                         track, artist, and album. Catalog metadata is saved per
-                        track link; recording ISRCs are listed separately.
+                        track link; recording ISRCs are listed separately. The
+                        form can use linked track metadata when no match is
+                        already saved for this listen.
                     </p>
                     <p className="mt-2 text-sm text-muted-foreground">
                         Spotify metadata lookup contacts Spotify only when you
@@ -467,7 +781,15 @@ export default function ListenDetails({
                     </p>
                     <div className="mt-3 flex flex-wrap gap-4 text-sm">
                         {(['spotify', 'apple'] as const).map((provider) => {
-                            const item = catalogs[provider];
+                            const current = catalogs[provider];
+                            const items = [
+                                ...(current ? [current] : []),
+                                ...linkedEvidence.filter(
+                                    (item) =>
+                                        item.provider === provider &&
+                                        item.id !== current?.id,
+                                ),
+                            ];
                             const name =
                                 provider === 'spotify'
                                     ? 'Spotify'
@@ -487,9 +809,14 @@ export default function ListenDetails({
                                         >
                                             Search {name}
                                         </a>
-                                        {item && (
+                                    </div>
+                                    {items.map((item) => (
+                                        <div
+                                            key={item.id}
+                                            className="space-y-1 text-muted-foreground"
+                                        >
                                             <a
-                                                className="underline"
+                                                className="text-foreground underline"
                                                 target="_blank"
                                                 rel="noreferrer"
                                                 href={catalogUrl(
@@ -499,10 +826,6 @@ export default function ListenDetails({
                                             >
                                                 Matched {name} track
                                             </a>
-                                        )}
-                                    </div>
-                                    {item && (
-                                        <div className="text-muted-foreground">
                                             <p>
                                                 {item.track_name} ·{' '}
                                                 {item.artist_name}
@@ -511,6 +834,12 @@ export default function ListenDetails({
                                                     : ''}{' '}
                                                 ({item.origin})
                                             </p>
+                                            {item.duration_ms != null && (
+                                                <p>
+                                                    Duration: {item.duration_ms}{' '}
+                                                    ms
+                                                </p>
+                                            )}
                                             {item.isrc && (
                                                 <p>ISRC: {item.isrc}</p>
                                             )}
@@ -538,7 +867,7 @@ export default function ListenDetails({
                                                 <p>Disc: {item.disc_number}</p>
                                             )}
                                         </div>
-                                    )}
+                                    ))}
                                 </div>
                             );
                         })}
@@ -577,6 +906,42 @@ export default function ListenDetails({
                                     </select>
                                     <InputError message={errors.provider} />
                                 </div>
+                                {chooseLinked && (
+                                    <div className="grid gap-2">
+                                        <Label htmlFor="linked-catalog-track">
+                                            Linked track to prefill
+                                        </Label>
+                                        <select
+                                            id="linked-catalog-track"
+                                            className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+                                            value={selectedLinked?.id ?? ''}
+                                            disabled={lookup.processing}
+                                            onChange={(event) => {
+                                                setSelectedLinkedCatalog({
+                                                    listenId: listen.id,
+                                                    provider: selectedCatalog,
+                                                    id: event.target.value,
+                                                });
+                                                setLookupError(null);
+                                                setSpotifySource(null);
+                                            }}
+                                        >
+                                            <option value="">
+                                                Choose a linked track
+                                            </option>
+                                            {linkedMatches.map((item) => (
+                                                <option
+                                                    key={item.id}
+                                                    value={item.id}
+                                                >
+                                                    {item.track_name} ·{' '}
+                                                    {item.artist_name} ·{' '}
+                                                    {item.id}
+                                                </option>
+                                            ))}
+                                        </select>
+                                    </div>
+                                )}
                                 <div className="grid gap-2">
                                     <Label htmlFor="catalog-url">
                                         Track link
@@ -821,162 +1186,221 @@ export default function ListenDetails({
                                 using your MusicBrainz account.
                             </p>
                         )}
-                        {!musicbrainzEnabled ? (
+                        {!musicbrainzEnabled && searchSource === 'local' && (
                             <p className="mt-3 text-sm">
-                                MusicBrainz matching is disabled. Set up the
-                                local database to search for recordings.
+                                Local MusicBrainz matching is disabled. Choose
+                                the MusicBrainz API to search online.
                             </p>
-                        ) : (
-                            <>
-                                <Form
-                                    {...show.form(listen.id)}
-                                    className="mt-4 flex flex-wrap items-end gap-3"
-                                >
-                                    <div className="grid flex-1 gap-2">
-                                        <Label htmlFor="recording-search">
-                                            Recording name starts with
-                                            (case-sensitive)
-                                        </Label>
-                                        <Input
-                                            id="recording-search"
-                                            name="q"
-                                            defaultValue={search}
-                                            maxLength={255}
-                                            required
-                                        />
-                                    </div>
-                                    <div className="grid flex-1 gap-2">
-                                        <Label htmlFor="artist-search">
-                                            Artist contains (optional)
-                                        </Label>
-                                        <Input
-                                            id="artist-search"
-                                            name="artist"
-                                            defaultValue={artistSearch}
-                                            maxLength={255}
-                                        />
-                                    </div>
-                                    <Button>Search</Button>
-                                </Form>
-                                <InputError
-                                    className="mt-2"
-                                    message={
-                                        errors.recording_mbid ??
-                                        errors.track_name ??
-                                        errors.artist_name ??
-                                        errors.q ??
-                                        errors.artist ??
-                                        errors.page
-                                    }
-                                />
-                                <h3 className="mt-5 font-medium">
-                                    Suggested recordings
-                                </h3>
-                                {suggestions.length === 0 ? (
-                                    <p className="mt-2 text-sm text-muted-foreground">
-                                        No recordings found. Try a shorter or
-                                        different name.
-                                    </p>
-                                ) : (
-                                    <ul className="mt-2 divide-y">
-                                        {suggestions.map((item) => (
-                                            <li
-                                                key={`${item.recording_mbid}-${item.track_name}-${item.artist_name}`}
-                                                className="flex flex-wrap items-center justify-between gap-3 py-3 text-sm"
-                                            >
-                                                <div>
-                                                    <p>
-                                                        {item.track_name} ·{' '}
-                                                        {item.artist_name}
-                                                    </p>
-                                                    <a
-                                                        className="text-muted-foreground underline"
-                                                        target="_blank"
-                                                        rel="noreferrer"
-                                                        href={`https://musicbrainz.org/recording/${encodeURIComponent(item.recording_mbid)}`}
-                                                    >
-                                                        View recording on
-                                                        MusicBrainz
-                                                    </a>
-                                                </div>
-                                                <Form
-                                                    {...match.form(listen.id)}
-                                                >
-                                                    {({ processing }) => (
-                                                        <>
-                                                            <input
-                                                                type="hidden"
-                                                                name="recording_mbid"
-                                                                value={
-                                                                    item.recording_mbid
-                                                                }
-                                                            />
-                                                            <input
-                                                                type="hidden"
-                                                                name="track_name"
-                                                                value={
-                                                                    item.track_name
-                                                                }
-                                                            />
-                                                            <input
-                                                                type="hidden"
-                                                                name="artist_name"
-                                                                value={
-                                                                    item.artist_name
-                                                                }
-                                                            />
-                                                            <Button
-                                                                type="submit"
-                                                                disabled={
-                                                                    processing
-                                                                }
-                                                            >
-                                                                Choose recording
-                                                            </Button>
-                                                        </>
-                                                    )}
-                                                </Form>
-                                            </li>
-                                        ))}
-                                    </ul>
-                                )}
-                                {(searchPage > 1 || hasMore) && (
-                                    <nav
-                                        aria-label="Recording search pages"
-                                        className="mt-4 flex gap-4 text-sm"
-                                    >
-                                        {searchPage > 1 && (
-                                            <Link
-                                                className="underline"
-                                                href={show(listen.id, {
-                                                    query: {
-                                                        q: search,
-                                                        artist: artistSearch,
-                                                        page: searchPage - 1,
-                                                    },
-                                                })}
-                                            >
-                                                Previous
-                                            </Link>
-                                        )}
-                                        {hasMore && (
-                                            <Link
-                                                className="underline"
-                                                href={show(listen.id, {
-                                                    query: {
-                                                        q: search,
-                                                        artist: artistSearch,
-                                                        page: searchPage + 1,
-                                                    },
-                                                })}
-                                            >
-                                                Next
-                                            </Link>
-                                        )}
-                                    </nav>
-                                )}
-                            </>
                         )}
+                        <>
+                            <p className="mt-3 text-sm text-muted-foreground">
+                                API searches send the entered recording and
+                                artist names to MusicBrainz. Choosing an API
+                                result also checks that recording online.
+                                Imports continue to use local matching.
+                            </p>
+                            <Form
+                                {...show.form(listen.id)}
+                                className="mt-4 flex flex-wrap items-end gap-3"
+                            >
+                                <div className="grid flex-1 gap-2">
+                                    <Label htmlFor="recording-search">
+                                        Recording name (local search is
+                                        case-sensitive and matches the start)
+                                    </Label>
+                                    <Input
+                                        ref={recordingSearchInput}
+                                        id="recording-search"
+                                        name="q"
+                                        defaultValue={search}
+                                        maxLength={255}
+                                        required
+                                    />
+                                </div>
+                                <div className="grid flex-1 gap-2">
+                                    <Label htmlFor="artist-search">
+                                        Artist contains (optional)
+                                    </Label>
+                                    <Input
+                                        id="artist-search"
+                                        name="artist"
+                                        defaultValue={artistSearch}
+                                        maxLength={255}
+                                    />
+                                </div>
+                                <div className="grid gap-2">
+                                    <Label htmlFor="recording-source">
+                                        Search source
+                                    </Label>
+                                    <select
+                                        key={searchSource}
+                                        id="recording-source"
+                                        name="search_source"
+                                        defaultValue={searchSource}
+                                        onChange={(event) => {
+                                            const input =
+                                                recordingSearchInput.current;
+                                            const defaultPrefix = Array.from(
+                                                listen.track_name,
+                                            )
+                                                .slice(0, 12)
+                                                .join('');
+                                            if (
+                                                event.target.value === 'api' &&
+                                                searchSource === 'local' &&
+                                                input?.value === defaultPrefix
+                                            ) {
+                                                input.value = listen.track_name;
+                                            }
+                                        }}
+                                        className="h-9 rounded-md border bg-background px-3 text-sm"
+                                    >
+                                        <option value="local">
+                                            Local MusicBrainz database
+                                        </option>
+                                        <option value="api">
+                                            MusicBrainz API (online)
+                                        </option>
+                                    </select>
+                                </div>
+                                <Button>Search</Button>
+                            </Form>
+                            <InputError
+                                className="mt-2"
+                                message={
+                                    errors.recording_mbid ??
+                                    errors.track_name ??
+                                    errors.artist_name ??
+                                    errors.q ??
+                                    errors.artist ??
+                                    errors.page ??
+                                    errors.search_source
+                                }
+                            />
+                            {apiError && (
+                                <p
+                                    role="alert"
+                                    className="mt-2 text-sm text-destructive"
+                                >
+                                    {apiError}
+                                </p>
+                            )}
+                            <h3 className="mt-5 font-medium">
+                                Suggested recordings
+                            </h3>
+                            {apiError ||
+                            (!musicbrainzEnabled &&
+                                searchSource ===
+                                    'local') ? null : suggestions.length ===
+                              0 ? (
+                                <p className="mt-2 text-sm text-muted-foreground">
+                                    No recordings found. Try a shorter or
+                                    different name.
+                                </p>
+                            ) : (
+                                <ul className="mt-2 divide-y">
+                                    {suggestions.map((item) => (
+                                        <li
+                                            key={`${item.recording_mbid}-${item.track_name}-${item.artist_name}`}
+                                            className="flex flex-wrap items-center justify-between gap-3 py-3 text-sm"
+                                        >
+                                            <div>
+                                                <p>
+                                                    {item.track_name} ·{' '}
+                                                    {item.artist_name}
+                                                </p>
+                                                <a
+                                                    className="text-muted-foreground underline"
+                                                    target="_blank"
+                                                    rel="noreferrer"
+                                                    href={`https://musicbrainz.org/recording/${encodeURIComponent(item.recording_mbid)}`}
+                                                >
+                                                    View recording on
+                                                    MusicBrainz
+                                                </a>
+                                            </div>
+                                            <Form {...match.form(listen.id)}>
+                                                {({ processing }) => (
+                                                    <>
+                                                        <input
+                                                            type="hidden"
+                                                            name="search_source"
+                                                            value={searchSource}
+                                                        />
+                                                        <input
+                                                            type="hidden"
+                                                            name="recording_mbid"
+                                                            value={
+                                                                item.recording_mbid
+                                                            }
+                                                        />
+                                                        <input
+                                                            type="hidden"
+                                                            name="track_name"
+                                                            value={
+                                                                item.track_name
+                                                            }
+                                                        />
+                                                        <input
+                                                            type="hidden"
+                                                            name="artist_name"
+                                                            value={
+                                                                item.artist_name
+                                                            }
+                                                        />
+                                                        <Button
+                                                            type="submit"
+                                                            disabled={
+                                                                processing
+                                                            }
+                                                        >
+                                                            Choose recording
+                                                        </Button>
+                                                    </>
+                                                )}
+                                            </Form>
+                                        </li>
+                                    ))}
+                                </ul>
+                            )}
+                            {(searchPage > 1 || hasMore) && (
+                                <nav
+                                    aria-label="Recording search pages"
+                                    className="mt-4 flex gap-4 text-sm"
+                                >
+                                    {searchPage > 1 && (
+                                        <Link
+                                            className="underline"
+                                            href={show(listen.id, {
+                                                query: {
+                                                    q: search,
+                                                    artist: artistSearch,
+                                                    search_source: searchSource,
+                                                    page: searchPage - 1,
+                                                },
+                                            })}
+                                        >
+                                            Previous
+                                        </Link>
+                                    )}
+                                    {hasMore && (
+                                        <Link
+                                            className="underline"
+                                            href={show(listen.id, {
+                                                query: {
+                                                    q: search,
+                                                    artist: artistSearch,
+                                                    search_source: searchSource,
+                                                    page: searchPage + 1,
+                                                },
+                                            })}
+                                        >
+                                            Next
+                                        </Link>
+                                    )}
+                                </nav>
+                            )}
+                        </>
                     </section>
                 )}
                 <section className="rounded-xl border p-5">

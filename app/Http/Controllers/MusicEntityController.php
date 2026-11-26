@@ -2,9 +2,12 @@
 
 namespace App\Http\Controllers;
 
+use App\Jobs\ScanArtistRecordings;
 use App\Models\Listen;
 use App\Services\CatalogMatcher;
+use App\Services\CatalogRecordingGroups;
 use App\Services\ManualMusicEntityMatcher;
+use App\Services\MusicBrainzApi;
 use App\Services\MusicBrainzMatcher;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
@@ -59,14 +62,29 @@ class MusicEntityController extends Controller
         return Inertia::render('music-entities/index', ['type' => $type, 'entities' => $entities, 'filters' => $values]);
     }
 
-    public function manage(Request $request, string $type, int $listen, ManualMusicEntityMatcher $manual, MusicBrainzMatcher $matcher): Response
+    public function manage(Request $request, string $type, int $listen, ManualMusicEntityMatcher $manual, MusicBrainzMatcher $matcher, CatalogMatcher $catalogMatcher, CatalogRecordingGroups $groups, MusicBrainzApi $api): Response
     {
         $item = $this->item($request, $type, $listen);
-        $values = $request->validate(['q' => ['nullable', 'string', 'max:255'], 'page' => ['nullable', 'integer', 'min:1', 'max:1000']]);
+        $values = $request->validate([
+            'q' => ['nullable', 'string', 'max:255'], 'page' => ['nullable', 'integer', 'min:1', 'max:1000'],
+            'search_source' => ['nullable', Rule::in(['local', 'api'])],
+        ]);
         $search = $values['q'] ?? '';
         $page = (int) ($values['page'] ?? 1);
-        $results = $matcher->searchEntity($type, $search, $page);
+        $source = $values['search_source'] ?? 'local';
+        $apiError = null;
+        if ($source === 'api') {
+            try {
+                $results = $api->searchEntity($type, $search, $page);
+            } catch (ValidationException $exception) {
+                $results = ['results' => [], 'hasMore' => false];
+                $apiError = $exception->errors()['musicbrainz_api'][0];
+            }
+        } else {
+            $results = $matcher->searchEntity($type, $search, $page);
+        }
         $row = $manual->saved($type, $item);
+        $catalogs = $row === null ? [] : json_decode($row->catalogs, true, 512, JSON_THROW_ON_ERROR);
         $pivot = $type === 'artist' ? 'listen_artists' : 'listen_releases';
         $table = $type === 'artist' ? 'music_artists' : 'music_releases';
         $foreignKey = $type === 'artist' ? 'music_artist_id' : 'music_release_id';
@@ -81,30 +99,56 @@ class MusicEntityController extends Controller
             'item' => ['listen_id' => $item->id, 'artist_name' => $item->artist_name, 'release_name' => $item->release_name],
             'canMatch' => $item->artist_name !== 'Unknown artist' && trim($item->artist_name) !== ''
                 && ($type !== 'album' || trim($item->release_name ?? '') !== ''),
-            'saved' => $row === null ? null : ['mbid' => $row->mbid, 'name' => $row->name,
-                'catalogs' => json_decode($row->catalogs, true, 512, JSON_THROW_ON_ERROR)],
+            'saved' => $row === null ? null : ['mbid' => $row->mbid, 'name' => $row->name, 'catalogs' => $catalogs],
+            'musicBrainzSeed' => $catalogMatcher->musicBrainzEntitySeed($type, $item, $catalogs, $groups->evidence($item)),
             'matched' => $matched,
             'listens' => $related,
             'search' => $search,
+            'searchSource' => $source,
+            'apiError' => $apiError,
             'searchPage' => $page,
             'suggestions' => $results['results'],
             'hasMore' => $results['hasMore'],
             'musicbrainzEnabled' => (bool) config('musicbrainz.enabled'),
+            'artistScan' => $type === 'artist' ? DB::table('artist_recording_scans')
+                ->where('user_id', $request->user()->id)->where('entity_key', $manual->key('artist', $item))
+                ->orderByDesc('id')->first(['status', 'source', 'processed', 'matched', 'error']) : null,
             'entityResult' => $request->session()->get('entity_result'),
         ]);
     }
 
-    public function matchMusicBrainz(Request $request, string $type, int $listen, MusicBrainzMatcher $matcher, ManualMusicEntityMatcher $manual): RedirectResponse
+    public function matchMusicBrainz(Request $request, string $type, int $listen, MusicBrainzMatcher $matcher, ManualMusicEntityMatcher $manual, MusicBrainzApi $api): RedirectResponse
     {
         $item = $this->item($request, $type, $listen);
-        $values = $request->validate(['mbid' => ['required', 'uuid'], 'name' => ['required', 'string', 'max:255']]);
-        $match = $matcher->entity($type, $values['mbid'], $values['name']);
+        $values = $request->validate([
+            'mbid' => ['required', 'uuid'], 'name' => ['required', 'string', 'max:255'],
+            'search_source' => ['nullable', Rule::in(['local', 'api'])],
+            'scan_source' => ['nullable', Rule::in(['local', 'api'])],
+        ]);
+        $match = ($values['search_source'] ?? 'local') === 'api'
+            ? $api->entity($type, $values['mbid'], $values['name'])
+            : $matcher->entity($type, $values['mbid'], $values['name']);
         if ($match === null) {
             throw ValidationException::withMessages(['mbid' => 'The selected item is unavailable in the local MusicBrainz database.']);
         }
-        $manual->remember($request->user(), $item, $type, musicbrainz: $match);
+        DB::transaction(function () use ($manual, $request, $item, $type, $match, $values): void {
+            $manual->remember($request->user(), $item, $type, musicbrainz: $match);
+            if ($type === 'artist') {
+                DB::table('artist_recording_scans')->where('user_id', $request->user()->id)
+                    ->where('entity_key', $manual->key('artist', $item))->whereIn('status', ['queued', 'running'])
+                    ->update(['status' => 'cancelled', 'updated_at' => now()]);
+                $scanId = DB::table('artist_recording_scans')->insertGetId([
+                    'user_id' => $request->user()->id, 'listen_id' => $item->id,
+                    'entity_key' => $manual->key('artist', $item), 'artist_mbid' => $match['mbid'],
+                    'source' => $values['scan_source'] ?? 'local', 'status' => 'queued',
+                    'created_at' => now(), 'updated_at' => now(),
+                ]);
+                ScanArtistRecordings::dispatch($scanId);
+            }
+        });
 
-        return to_route('music-entities.manage', ['type' => $type, 'listen' => $listen])->with('entity_result', 'MusicBrainz match saved.');
+        return to_route('music-entities.manage', ['type' => $type, 'listen' => $listen])
+            ->with('entity_result', $type === 'artist' ? 'MusicBrainz match saved; the recording scan was queued.' : 'MusicBrainz match saved.');
     }
 
     public function matchCatalog(Request $request, string $type, int $listen, CatalogMatcher $matcher, ManualMusicEntityMatcher $manual): RedirectResponse

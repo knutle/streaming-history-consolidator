@@ -152,15 +152,16 @@ class MusicBrainzMatcher
     /**
      * @return array{recording_mbid: string, artist_name: string, artist_mbids: list<string>, release_mbid: ?string}|null
      */
-    public function match(string $track, string $artist, string $album): ?array
+    public function match(string $track, string $artist, string $album, ?bool &$ambiguous = null): ?array
     {
+        $ambiguous = false;
         if (! config('musicbrainz.enabled') || ($artist === '' && $album === '')) {
             return null;
         }
 
         $db = DB::connection('musicbrainz');
         if (config('musicbrainz.format') === 'canonical' && $db->getDriverName() === 'sqlite') {
-            return $this->matchCanonical($track, $artist, $album);
+            return $this->matchCanonical($track, $artist, $album, $ambiguous);
         }
 
         $query = $db->table('recording')
@@ -193,6 +194,8 @@ class MusicBrainzMatcher
             $recordings = $this->matchingRecords($aliases->cursor(), $artist, 'alias_name');
         }
         if (count($recordings) !== 1) {
+            $ambiguous = count($recordings) > 1;
+
             return null;
         }
         $recording = reset($recordings);
@@ -227,7 +230,7 @@ class MusicBrainzMatcher
     /**
      * @return array{recording_mbid: string, artist_name: string, artist_mbids: list<string>, release_mbid: ?string}|null
      */
-    private function matchCanonical(string $track, string $artist, string $album): ?array
+    private function matchCanonical(string $track, string $artist, string $album, bool &$ambiguous): ?array
     {
         $query = DB::connection('musicbrainz')->table('canonical_recordings')
             ->where('recording_name', $track);
@@ -247,6 +250,8 @@ class MusicBrainzMatcher
                 $releases[$row->release_mbid] = true;
             }
             if (count($recordings) > 1 || count($credits) > 1) {
+                $ambiguous = true;
+
                 return null;
             }
         }

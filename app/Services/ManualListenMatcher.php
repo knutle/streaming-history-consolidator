@@ -9,7 +9,7 @@ use Illuminate\Validation\ValidationException;
 
 class ManualListenMatcher
 {
-    public function __construct(private MatchedMusicMetadata $matchedMetadata) {}
+    public function __construct(private MatchedMusicMetadata $matchedMetadata, private CatalogRecordingGroups $catalogGroups) {}
 
     public function key(string $track, string $artist): string
     {
@@ -47,8 +47,10 @@ class ManualListenMatcher
             );
 
             $updated = 0;
+            $groups = [];
+            $catalogGroups = [];
             Listen::query()->where('user_id', $user->id)->whereNull('recording_mbid')
-                ->chunkById(500, function ($listens) use ($key, $match, &$updated) {
+                ->chunkById(500, function ($listens) use ($key, $match, &$updated, &$groups, &$catalogGroups) {
                     foreach ($listens as $candidate) {
                         if ($this->key($candidate->track_name, $candidate->artist_name) !== $key) {
                             continue;
@@ -61,8 +63,23 @@ class ManualListenMatcher
                         $candidate->update(['recording_mbid' => $match['recording_mbid'], 'track_metadata' => $metadata]);
                         $this->matchedMetadata->sync($candidate);
                         $updated++;
+                        $catalog = $this->catalogGroups->native($candidate);
+                        if ($catalog !== null) {
+                            $catalogKey = $candidate->source.':'.$catalog['id'];
+                            if (! array_key_exists($catalogKey, $catalogGroups)) {
+                                $catalogGroups[$catalogKey] = $this->catalogGroups->groupId($candidate);
+                            }
+                            $group = $catalogGroups[$catalogKey];
+                            if ($group !== null) {
+                                $groups[$group] = $candidate;
+                            }
+                        }
                     }
                 });
+
+            foreach ($groups as $candidate) {
+                $updated += $this->catalogGroups->recordMatch($user, $candidate, $match);
+            }
 
             return $updated;
         });
