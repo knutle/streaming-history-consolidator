@@ -195,6 +195,17 @@ class MusicBrainzSetupTest extends TestCase
         $this->assertNull(app(MusicBrainzMatcher::class)->match('Track', 'Artist & Guest', ''));
         $this->assertNull(app(MusicBrainzMatcher::class)->match('Track', 'Artist & Guest', 'Wrong album'));
         $this->assertSame('55555555-5555-4555-8555-555555555555', app(MusicBrainzMatcher::class)->match('Other track', '', 'Other album')['release_mbid']);
+
+        $unmatched = [...$row, 'ts' => '2024-01-02T12:00:00Z', 'master_metadata_album_album_name' => 'Wrong album'];
+        $this->post(route('listens.import'), [
+            'source' => 'spotify', 'file' => UploadedFile::fake()->createWithContent('history.json', json_encode([$unmatched], JSON_THROW_ON_ERROR)),
+        ])->assertSessionHas('import_result', ['imported' => 1, 'duplicates' => 0, 'matched' => 0]);
+        $listen = Listen::query()->whereNull('recording_mbid')->sole();
+        $this->get(route('listens.show', ['listen' => $listen->id, 'q' => 'Tra']))->assertOk();
+        $this->post(route('listens.match', $listen->id), [
+            'recording_mbid' => '22222222-2222-4222-8222-222222222222', 'track_name' => 'Track', 'artist_name' => 'Artist & Guest',
+        ])->assertSessionHas('match_result', 1);
+        $this->assertSame('22222222-2222-4222-8222-222222222222', $listen->fresh()->recording_mbid);
     }
 
     public function test_canonical_connection_is_discovered_and_external_settings_take_precedence(): void

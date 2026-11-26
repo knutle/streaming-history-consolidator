@@ -3,7 +3,8 @@ import InputError from '@/components/input-error';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { index, importMethod } from '@/routes/listens';
+import { index, show } from '@/routes/listens';
+import { edit as profileEdit } from '@/routes/profile';
 
 type Listen = {
     id: number;
@@ -31,19 +32,12 @@ type Props = {
         sort?: string;
         direction?: string;
     };
-    musicbrainzEnabled: boolean;
-    importResult?: { imported: number; duplicates: number; matched: number };
 };
 
 const selectClass =
     'h-9 w-full rounded-md border border-input bg-background px-3 text-sm shadow-xs';
 
-export default function ListeningHistory({
-    listens,
-    filters,
-    musicbrainzEnabled,
-    importResult,
-}: Props) {
+export default function ListeningHistory({ listens, filters }: Props) {
     const { errors } = usePage().props;
 
     return (
@@ -55,87 +49,19 @@ export default function ListeningHistory({
                         Listening history
                     </h1>
                     <p className="text-sm text-muted-foreground">
-                        Import and browse your Spotify and Apple Music history.
+                        Browse your Spotify and Apple Music history.{' '}
+                        <Link href={profileEdit()} className="underline">
+                            Import history in profile settings.
+                        </Link>
+                        {' · '}
+                        <Link
+                            href={index({ query: { match: 'unmatched' } })}
+                            className="underline"
+                        >
+                            Identify unmatched listens
+                        </Link>
                     </p>
                 </div>
-
-                <section className="rounded-xl border p-4">
-                    <h2 className="text-lg font-semibold">Import history</h2>
-                    <p className="mt-1 text-sm text-muted-foreground">
-                        Upload a Spotify extended history JSON file or an Apple
-                        Music Play Activity CSV. Re-imports skip previously
-                        processed events. Apple playback events are imported
-                        individually, not combined into listening sessions.
-                    </p>
-                    {!musicbrainzEnabled && (
-                        <p className="mt-2 text-sm text-amber-700 dark:text-amber-400">
-                            MusicBrainz matching is disabled. Run{' '}
-                            <code>php artisan musicbrainz:setup</code> locally
-                            or configure an existing database before importing.
-                            Previously imported listens are not rematched on
-                            re-import.
-                        </p>
-                    )}
-                    {importResult && (
-                        <p role="status" className="mt-2 text-sm">
-                            Imported {importResult.imported}; already imported{' '}
-                            {importResult.duplicates}; matched{' '}
-                            {importResult.matched}.
-                        </p>
-                    )}
-                    <Form
-                        {...importMethod.form()}
-                        encType="multipart/form-data"
-                        className="mt-4 flex flex-wrap items-end gap-3"
-                    >
-                        {({ errors, processing, progress }) => (
-                            <>
-                                <div className="grid gap-2">
-                                    <Label htmlFor="import-source">
-                                        Source
-                                    </Label>
-                                    <select
-                                        id="import-source"
-                                        name="source"
-                                        className={selectClass}
-                                        defaultValue="spotify"
-                                    >
-                                        <option value="spotify">Spotify</option>
-                                        <option value="apple">
-                                            Apple Music
-                                        </option>
-                                    </select>
-                                    <InputError message={errors.source} />
-                                </div>
-                                <div className="grid min-w-64 flex-1 gap-2">
-                                    <Label htmlFor="file">History file</Label>
-                                    <Input
-                                        id="file"
-                                        name="file"
-                                        type="file"
-                                        accept=".json,.csv,application/json,text/csv"
-                                        required
-                                    />
-                                    <InputError message={errors.file} />
-                                </div>
-                                <Button disabled={processing}>
-                                    {processing ? 'Importing…' : 'Import'}
-                                </Button>
-                                {progress && (
-                                    <span className="text-sm">
-                                        Uploading {progress.percentage}%
-                                    </span>
-                                )}
-                            </>
-                        )}
-                    </Form>
-                    <p className="mt-2 text-xs text-muted-foreground">
-                        Maximum file size is 1 GB, subject to your server’s PHP
-                        upload limits. Timestamp values without a timezone are
-                        interpreted as UTC. Only music events with positive
-                        playback duration are imported.
-                    </p>
-                </section>
 
                 <section className="rounded-xl border p-4">
                     <h2 className="text-lg font-semibold">Browse listens</h2>
@@ -259,7 +185,12 @@ export default function ListeningHistory({
                                                 .slice(0, 19)}
                                         </td>
                                         <td className="p-2">
-                                            {listen.track_name}
+                                            <Link
+                                                href={show(listen.id)}
+                                                className="underline"
+                                            >
+                                                {listen.track_name}
+                                            </Link>
                                         </td>
                                         <td className="p-2">
                                             {listen.artist_name}

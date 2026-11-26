@@ -10,7 +10,7 @@ use JsonException;
 class StreamingHistoryReader
 {
     /**
-     * @return Generator<int, array{timestamp: string, track: string, artist: string, album: string, played_ms: int, duration_ms: ?int, uri: string, start_time: bool}>
+     * @return Generator<int, array{timestamp: string, track: string, artist: string, identity_artist?: string, album: string, played_ms: int, duration_ms: ?int, uri: string, start_time: bool}>
      */
     public function read(string $path, string $source): Generator
     {
@@ -116,7 +116,7 @@ class StreamingHistoryReader
 
     /**
      * @param  resource  $file
-     * @return Generator<int, array{timestamp: string, track: string, artist: string, album: string, played_ms: int, duration_ms: ?int, uri: string, start_time: bool}>
+     * @return Generator<int, array{timestamp: string, track: string, artist: string, identity_artist: string, album: string, played_ms: int, duration_ms: ?int, uri: string, start_time: bool}>
      */
     private function apple($file): Generator
     {
@@ -160,10 +160,17 @@ class StreamingHistoryReader
             $start = trim((string) ($row['Event Start Timestamp'] ?? ''));
             $timestamp = $this->timestamp($start !== '' ? $start : ($row['Event End Timestamp'] ?? ''));
             $duration = trim((string) ($row['Media Duration In Milliseconds'] ?? ''));
+            $artist = $this->text($row['Artist Name'] ?? '');
+            $albumArtist = $this->text($row['Album Artist Name'] ?? '');
+            if ($albumArtist === '') {
+                $albumArtist = $this->text($row['Album Artist'] ?? '');
+            }
             yield [
                 'timestamp' => $timestamp,
                 'track' => $track,
-                'artist' => $this->text($row['Artist Name'] ?? ''),
+                'artist' => $albumArtist !== '' ? $albumArtist : $artist,
+                // Preserve fingerprints from imports made before album-artist support.
+                'identity_artist' => $artist,
                 'album' => $this->text($row['Album Name'] ?? ''),
                 'played_ms' => $played,
                 'duration_ms' => $duration === '' ? null : $this->milliseconds($duration),

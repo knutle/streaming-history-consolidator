@@ -16,6 +16,12 @@ class ListenImportTest extends TestCase
 {
     use RefreshDatabase;
 
+    protected function setUp(): void
+    {
+        parent::setUp();
+        config(['musicbrainz.enabled' => false, 'musicbrainz.format' => 'full']);
+    }
+
     private function spotify(array $rows): UploadedFile
     {
         return UploadedFile::fake()->createWithContent('history.json', json_encode($rows, JSON_THROW_ON_ERROR));
@@ -86,6 +92,160 @@ class ListenImportTest extends TestCase
     {
         $this->get(route('listens.index'))->assertRedirect(route('login'));
         $this->post(route('listens.import'))->assertRedirect(route('login'));
+        $this->delete(route('listens.destroy'))->assertRedirect(route('login'));
+        $this->get(route('listens.show', 1))->assertRedirect(route('login'));
+        $this->post(route('listens.match', 1))->assertRedirect(route('login'));
+    }
+
+    public function test_deleting_listening_history_only_removes_the_current_users_listens_and_allows_reimport(): void
+    {
+        $user = User::factory()->create();
+        $other = User::factory()->create();
+        $row = $this->row('2024-01-01T12:00:00Z');
+        $apple = "Song Name,Artist Name,Event Start Timestamp,Play Duration Milliseconds\n".
+            "Track,Artist,2024-01-02T12:00:00Z,60000\n";
+        $this->actingAs($user)->post(route('listens.import'), [
+            'source' => 'spotify', 'file' => $this->spotify([$row]),
+        ])->assertSessionHas('import_result', ['imported' => 1, 'duplicates' => 0, 'matched' => 0]);
+        $this->post(route('listens.import'), [
+            'source' => 'apple', 'file' => UploadedFile::fake()->createWithContent('activity.csv', $apple),
+        ])->assertSessionHas('import_result', ['imported' => 1, 'duplicates' => 0, 'matched' => 0]);
+        $this->actingAs($other)->post(route('listens.import'), [
+            'source' => 'spotify', 'file' => $this->spotify([$row]),
+        ])->assertSessionHasNoErrors();
+        $otherListen = Listen::query()->where('user_id', $other->id)->sole();
+        $this->assertSame(2, Listen::query()->where('user_id', $user->id)->count());
+
+        $this->actingAs($user)->delete(route('listens.destroy'), ['user_id' => $other->id])
+            ->assertSessionHasNoErrors()->assertRedirect(route('profile.edit'));
+
+        $this->assertDatabaseMissing('listens', ['user_id' => $user->id]);
+        $this->assertModelExists($otherListen);
+        $this->assertAuthenticatedAs($user);
+        $this->post(route('listens.import'), [
+            'source' => 'spotify', 'file' => $this->spotify([$row]),
+        ])->assertSessionHas('import_result', ['imported' => 1, 'duplicates' => 0, 'matched' => 0]);
+    }
+
+    public function test_unverified_users_can_delete_their_listening_history(): void
+    {
+        $user = User::factory()->create();
+        $this->actingAs($user)->post(route('listens.import'), [
+            'source' => 'spotify', 'file' => $this->spotify([$this->row('2024-01-01T12:00:00Z')]),
+        ])->assertSessionHas('import_result', ['imported' => 1, 'duplicates' => 0, 'matched' => 0]);
+        $user->forceFill(['email_verified_at' => null])->save();
+
+        $this->delete(route('listens.destroy'))->assertRedirect(route('profile.edit'));
+
+        $this->assertDatabaseMissing('listens', ['user_id' => $user->id]);
+    }
+
+    public function test_import_validation_errors_return_to_profile_settings(): void
+    {
+        $this->actingAs(User::factory()->create())
+            ->from(route('profile.edit'))
+            ->post(route('listens.import'), ['source' => 'spotify'])
+            ->assertRedirect(route('profile.edit'))
+            ->assertSessionHasErrors('file');
+    }
+
+    public function test_manual_matching_updates_only_own_unmatched_listens_and_is_remembered_for_future_imports(): void
+    {
+        $this->musicbrainz();
+        $user = User::factory()->create();
+        $other = User::factory()->create();
+        $first = $this->row('2024-01-01T12:00:00Z', album: 'Unknown album');
+        $second = $this->row('2024-01-02T12:00:00Z', album: 'Another album');
+        $this->actingAs($user)->post(route('listens.import'), [
+            'source' => 'spotify', 'file' => $this->spotify([$first, $second]),
+        ])->assertSessionHas('import_result', ['imported' => 2, 'duplicates' => 0, 'matched' => 0]);
+        $listen = Listen::query()->where('user_id', $user->id)->firstOrFail();
+        $this->actingAs($other)->post(route('listens.import'), [
+            'source' => 'spotify', 'file' => $this->spotify([$first]),
+        ])->assertSessionHasNoErrors();
+
+        $this->actingAs($user)->get(route('listens.show', ['listen' => $listen->id, 'q' => 'Tra']))
+            ->assertOk()->assertInertia(fn (Assert $page) => $page->component('listens/show')
+            ->where('suggestions.0.recording_mbid', '22222222-2222-4222-8222-222222222222')
+            ->has('related', 1));
+        $this->post(route('listens.match', $listen->id), [
+            'recording_mbid' => '22222222-2222-4222-8222-222222222222', 'track_name' => 'Track', 'artist_name' => 'Artist',
+        ])->assertRedirect(route('listens.show', $listen->id))->assertSessionHas('match_result', 2);
+
+        $this->assertSame(2, Listen::query()->where('user_id', $user->id)->where('recording_mbid', '22222222-2222-4222-8222-222222222222')->count());
+        $this->assertNull(Listen::query()->where('user_id', $other->id)->sole()->recording_mbid);
+        $this->assertSame(['11111111-1111-4111-8111-111111111111'], $listen->fresh()->track_metadata['additional_info']['artist_mbids']);
+
+        config(['musicbrainz.enabled' => false]);
+        $this->post(route('listens.import'), [
+            'source' => 'spotify', 'file' => $this->spotify([$this->row('2024-01-03T12:00:00Z', album: 'Third album')]),
+        ])->assertSessionHas('import_result', ['imported' => 1, 'duplicates' => 0, 'matched' => 1]);
+        $this->assertSame(3, Listen::query()->where('user_id', $user->id)->whereNotNull('recording_mbid')->count());
+        $this->actingAs($other)->post(route('listens.import'), [
+            'source' => 'spotify', 'file' => $this->spotify([$this->row('2024-01-03T12:00:00Z', album: 'Third album')]),
+        ])->assertSessionHas('import_result', ['imported' => 1, 'duplicates' => 0, 'matched' => 0]);
+        $this->actingAs($user)->delete(route('listens.destroy'))->assertRedirect(route('profile.edit'));
+        $this->assertDatabaseMissing('import_batches', ['user_id' => $user->id]);
+        $this->post(route('listens.import'), [
+            'source' => 'spotify', 'file' => $this->spotify([$first]),
+        ])->assertSessionHas('import_result', ['imported' => 1, 'duplicates' => 0, 'matched' => 1]);
+    }
+
+    public function test_recording_search_supports_artist_filter_and_pagination(): void
+    {
+        $this->musicbrainz();
+        $db = DB::connection('musicbrainz');
+        $db->table('artist_credit')->insert(['id' => 2, 'name' => 'Other artist']);
+        for ($i = 1; $i <= 31; $i++) {
+            $db->table('recording')->insert([
+                'id' => $i + 1, 'gid' => sprintf('00000000-0000-4000-8000-%012d', $i),
+                'name' => 'Track variation', 'artist_credit' => 2,
+            ]);
+        }
+        $this->actingAs(User::factory()->create())->post(route('listens.import'), [
+            'source' => 'spotify', 'file' => $this->spotify([$this->row('2024-01-01T12:00:00Z', album: 'Unknown')]),
+        ])->assertSessionHasNoErrors();
+        $listen = Listen::query()->sole();
+
+        $this->get(route('listens.show', ['listen' => $listen->id, 'q' => 'Tra', 'artist' => 'other']))
+            ->assertInertia(fn (Assert $page) => $page->has('suggestions', 30)->where('hasMore', true));
+        $this->get(route('listens.show', ['listen' => $listen->id, 'q' => 'Tra', 'artist' => 'other', 'page' => 2]))
+            ->assertInertia(fn (Assert $page) => $page->has('suggestions', 1)->where('hasMore', false));
+    }
+
+    public function test_listen_details_and_manual_matches_are_scoped_to_the_owner_and_validate_recordings(): void
+    {
+        $this->musicbrainz();
+        $owner = User::factory()->create();
+        $this->actingAs($owner)->post(route('listens.import'), [
+            'source' => 'spotify', 'file' => $this->spotify([$this->row('2024-01-01T12:00:00Z', album: 'Unknown')]),
+        ])->assertSessionHasNoErrors();
+        $listen = Listen::query()->sole();
+        $this->actingAs(User::factory()->create())->get(route('listens.show', $listen->id))->assertNotFound();
+        $this->post(route('listens.match', $listen->id), [
+            'recording_mbid' => '22222222-2222-4222-8222-222222222222', 'track_name' => 'Track', 'artist_name' => 'Artist',
+        ])->assertNotFound();
+        $this->actingAs($owner)->from(route('listens.show', $listen->id))->post(route('listens.match', $listen->id), [
+            'recording_mbid' => '22222222-2222-4222-8222-222222222222', 'track_name' => 'Wrong track', 'artist_name' => 'Artist',
+        ])->assertSessionHasErrors('recording_mbid');
+        $this->assertNull($listen->fresh()->recording_mbid);
+    }
+
+    public function test_dashboard_displays_only_the_current_users_listens_and_recent_imports(): void
+    {
+        $this->travelTo(now()->startOfDay());
+        $user = User::factory()->create();
+        $this->actingAs($user)->post(route('listens.import'), [
+            'source' => 'spotify', 'file' => $this->spotify([$this->row(now()->toIso8601String())]),
+        ])->assertSessionHasNoErrors();
+        $this->actingAs(User::factory()->create())->post(route('listens.import'), [
+            'source' => 'spotify', 'file' => $this->spotify([$this->row(now()->toIso8601String())]),
+        ])->assertSessionHasNoErrors();
+
+        $this->actingAs($user)->get(route('dashboard'))->assertOk()->assertInertia(fn (Assert $page) => $page
+            ->component('dashboard')->where('stats.total', 1)->where('stats.playedMs', 60000)
+            ->where('stats.unmatched', 1)->where('stats.last30Days', 1)->has('imports', 1)
+            ->where('imports.0.imported', 1));
     }
 
     public function test_spotify_import_matches_recording_and_deduplicates_per_user(): void
@@ -96,7 +256,12 @@ class ListenImportTest extends TestCase
         $podcast = ['ts' => '2024-01-01T12:01:00Z', 'ms_played' => 60000, 'master_metadata_track_name' => null];
         $this->actingAs($user)->post(route('listens.import'), [
             'source' => 'spotify', 'file' => $this->spotify([$row, $row, $podcast]),
-        ])->assertRedirect(route('listens.index'))->assertSessionHas('import_result', ['imported' => 1, 'duplicates' => 1, 'matched' => 1]);
+        ])->assertRedirect(route('profile.edit'))->assertSessionHas('import_result', ['imported' => 1, 'duplicates' => 1, 'matched' => 1]);
+
+        $this->get(route('profile.edit'))->assertOk()->assertInertia(fn (Assert $page) => $page
+            ->component('settings/profile')
+            ->where('musicbrainzEnabled', true)
+            ->where('importResult', ['imported' => 1, 'duplicates' => 1, 'matched' => 1]));
 
         $listen = Listen::query()->sole();
         $this->assertSame(1704110340, $listen->listened_at);
@@ -147,6 +312,47 @@ class ListenImportTest extends TestCase
             'source' => 'spotify', 'file' => $this->spotify([$this->row('2024-01-01T12:00:00Z')]),
         ])->assertSessionHas('import_result', ['imported' => 1, 'duplicates' => 0, 'matched' => 0]);
         $this->assertNull(Listen::query()->sole()->recording_mbid);
+    }
+
+    public function test_apple_import_prefers_album_artist_for_matching_and_falls_back_to_track_artist(): void
+    {
+        $this->musicbrainz();
+        $csv = "Song Name,Artist Name,Album Artist Name,Album Artist,Album Name,Event Start Timestamp,Play Duration Milliseconds,Event ID\n".
+            "Track,Featured artist, Artist ,Different artist,Album,2024-01-01T12:00:00Z,60000,one\n".
+            "Track,Featured artist,,Artist,Album,2024-01-01T12:01:00Z,60000,two\n".
+            "Unknown,Track artist, , ,Album,2024-01-01T12:02:00Z,60000,three\n".
+            "Track,,Artist,,Album,2024-01-01T12:03:00Z,60000,four\n";
+
+        $this->actingAs(User::factory()->create())->post(route('listens.import'), [
+            'source' => 'apple', 'file' => UploadedFile::fake()->createWithContent('activity.csv', $csv),
+        ])->assertSessionHas('import_result', ['imported' => 4, 'duplicates' => 0, 'matched' => 3]);
+
+        $matched = Listen::query()->where('track_name', 'Track')->get();
+        $this->assertCount(3, $matched);
+        foreach ($matched as $listen) {
+            $this->assertSame('Artist', $listen->artist_name);
+            $this->assertSame('Artist', $listen->track_metadata['artist_name']);
+            $this->assertSame('22222222-2222-4222-8222-222222222222', $listen->recording_mbid);
+        }
+        $this->assertSame('Track artist', Listen::query()->where('track_name', 'Unknown')->sole()->artist_name);
+    }
+
+    public function test_apple_album_artist_does_not_duplicate_previously_imported_events_without_ids(): void
+    {
+        $withoutAlbumArtist = "Song Name,Artist Name,Album Name,Event Start Timestamp,Play Duration Milliseconds\n".
+            "Track,Featured artist,Album,2024-01-01T12:00:00Z,60000\n";
+        $withAlbumArtist = "Song Name,Artist Name,Album Artist Name,Album Name,Event Start Timestamp,Play Duration Milliseconds\n".
+            "Track,Featured artist,Album artist,Album,2024-01-01T12:00:00Z,60000\n";
+
+        $this->actingAs(User::factory()->create())->post(route('listens.import'), [
+            'source' => 'apple', 'file' => UploadedFile::fake()->createWithContent('old.csv', $withoutAlbumArtist),
+        ])->assertSessionHas('import_result', ['imported' => 1, 'duplicates' => 0, 'matched' => 0]);
+        $this->post(route('listens.import'), [
+            'source' => 'apple', 'file' => UploadedFile::fake()->createWithContent('new.csv', $withAlbumArtist),
+        ])->assertSessionHas('import_result', ['imported' => 0, 'duplicates' => 1, 'matched' => 0]);
+
+        $this->assertDatabaseCount('listens', 1);
+        $this->assertSame('Featured artist', Listen::query()->sole()->artist_name);
     }
 
     public function test_invalid_or_incomplete_upload_rolls_back_the_entire_import(): void

@@ -4,6 +4,9 @@ namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
 
+/**
+ * @property array{artist_name: string, track_name: string, additional_info: array<string, mixed>, release_name?: string} $track_metadata
+ */
 class Listen extends Model
 {
     protected $fillable = [

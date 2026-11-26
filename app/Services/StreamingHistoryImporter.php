@@ -14,12 +14,14 @@ class StreamingHistoryImporter
     public function __construct(
         private StreamingHistoryReader $reader,
         private MusicBrainzMatcher $matcher,
+        private ManualListenMatcher $manualMatcher,
     ) {}
 
     /** @return array{imported: int, duplicates: int, matched: int} */
     public function import(User $user, string $source, string $path): array
     {
         return DB::transaction(function () use ($user, $source, $path) {
+            DB::table('users')->where('id', $user->id)->lockForUpdate()->first();
             $counts = ['imported' => 0, 'duplicates' => 0, 'matched' => 0];
             $matches = [];
 
@@ -28,7 +30,7 @@ class StreamingHistoryImporter
                     ? ['event_id', $entry['uri']]
                     : [
                         $entry['timestamp'], $entry['played_ms'], $entry['start_time'],
-                        $entry['uri'] !== '' ? $entry['uri'] : [$entry['track'], $entry['artist'], $entry['album']],
+                        $entry['uri'] !== '' ? $entry['uri'] : [$entry['track'], $entry['identity_artist'] ?? $entry['artist'], $entry['album']],
                     ];
                 $fingerprint = hash('sha256', json_encode($identityValues, JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE));
                 $identity = ['user_id' => $user->id, 'source' => $source, 'fingerprint' => $fingerprint];
@@ -41,7 +43,8 @@ class StreamingHistoryImporter
                 $key = json_encode([$entry['track'], $entry['artist'], $entry['album']], JSON_THROW_ON_ERROR);
                 if (! array_key_exists($key, $matches)) {
                     try {
-                        $matches[$key] = $this->matcher->match($entry['track'], $entry['artist'], $entry['album']);
+                        $matches[$key] = $this->manualMatcher->remembered($user, $entry['track'], $entry['artist'])
+                            ?? $this->matcher->match($entry['track'], $entry['artist'], $entry['album']);
                     } catch (QueryException $exception) {
                         report($exception);
 
@@ -95,6 +98,14 @@ class StreamingHistoryImporter
                     $counts['duplicates']++;
                 }
             }
+
+            DB::table('import_batches')->insert([
+                'user_id' => $user->id,
+                'source' => $source,
+                ...$counts,
+                'created_at' => now(),
+                'updated_at' => now(),
+            ]);
 
             return $counts;
         });

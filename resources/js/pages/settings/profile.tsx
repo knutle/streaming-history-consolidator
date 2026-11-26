@@ -1,8 +1,10 @@
 import { Form, Head, usePage } from '@inertiajs/react';
 import { Link } from '@inertiajs/react';
 import ProfileController from '@/actions/App/Http/Controllers/Settings/ProfileController';
+import DeleteListeningHistory from '@/components/delete-listening-history';
 import DeleteUser from '@/components/delete-user';
 import Heading from '@/components/heading';
+import ImportHistory from '@/components/import-history';
 import InputError from '@/components/input-error';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -18,9 +20,17 @@ type PageProps = {
 export default function Profile({
     mustVerifyEmail,
     status,
+    musicbrainzEnabled,
+    importResult,
 }: {
     mustVerifyEmail: boolean;
     status?: string;
+    musicbrainzEnabled: boolean;
+    importResult: {
+        imported: number;
+        duplicates: number;
+        matched: number;
+    } | null;
 }) {
     const { auth } = usePage<PageProps>().props;
 
@@ -123,6 +133,14 @@ export default function Profile({
                 </Form>
             </div>
 
+            <ImportHistory
+                musicbrainzEnabled={musicbrainzEnabled}
+                importResult={importResult}
+                canImport={
+                    !mustVerifyEmail || auth.user.email_verified_at !== null
+                }
+            />
+            <DeleteListeningHistory />
             <DeleteUser />
         </>
     );
