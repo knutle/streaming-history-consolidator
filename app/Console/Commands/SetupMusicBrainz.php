@@ -118,7 +118,7 @@ HELP;
             if (is_file($connectionPath)) {
                 $connection = json_decode(File::get($connectionPath), true, 512, JSON_THROW_ON_ERROR);
                 if (($connection['format'] ?? null) === 'canonical') {
-                    $canonicalImporter->verify($connection['database']);
+                    $canonicalImporter->verify($root.'/canonical.sqlite');
                     $this->info('The existing local canonical MusicBrainz database is accessible.');
 
                     return self::SUCCESS;

@@ -44,7 +44,7 @@ return [
 
         'musicbrainz' => $canonicalMusicBrainz ? [
             'driver' => 'sqlite',
-            'database' => $localMusicBrainz['database'],
+            'database' => dirname($musicBrainzPath).'/canonical.sqlite',
             'prefix' => '',
             'foreign_key_constraints' => false,
         ] : [

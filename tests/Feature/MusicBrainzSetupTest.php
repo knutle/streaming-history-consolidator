@@ -242,6 +242,25 @@ class MusicBrainzSetupTest extends TestCase
         $this->assertSame('pgsql|1|musicbrainz_db', trim($external->output()));
     }
 
+    public function test_canonical_database_is_accessible_when_setup_was_created_at_another_path(): void
+    {
+        $this->canonicalCsv([
+            ['11111111-1111-4111-8111-111111111111', 'Artist', '33333333-3333-4333-8333-333333333333', 'Album', '22222222-2222-4222-8222-222222222222', 'Track'],
+        ]);
+        $this->artisan('musicbrainz:setup', ['--canonical-csv' => $this->csv])->assertSuccessful();
+        File::put($this->root.'/connection.json', json_encode([
+            'format' => 'canonical',
+            'database' => '/another-machine/canonical.sqlite',
+        ], JSON_THROW_ON_ERROR));
+
+        $command = [PHP_BINARY, 'artisan', 'tinker', '--execute=echo DB::connection("musicbrainz")->table("canonical_recordings")->count();'];
+        $result = Process::env(['APP_ENV' => 'testing', 'MUSICBRAINZ_SETUP_PATH' => $this->root])->run($command);
+
+        $this->assertTrue($result->successful(), $result->errorOutput());
+        $this->assertSame('1', trim($result->output()));
+        $this->artisan('musicbrainz:setup')->assertSuccessful();
+    }
+
     public function test_redirect_csv_is_rejected_without_creating_a_setup_directory(): void
     {
         File::put($this->csv, "recording_mbid,canonical_recording_mbid,canonical_release_mbid\n");
