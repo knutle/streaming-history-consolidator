@@ -17,6 +17,7 @@ class StreamingHistoryImporter
         private MusicBrainzMatcher $matcher,
         private ManualListenMatcher $manualMatcher,
         private AppleMusicArchiveReader $archiveReader,
+        private CatalogMatcher $catalogMatcher,
     ) {}
 
     /** @return array{imported: int, duplicates: int, matched: int} */
@@ -49,6 +50,15 @@ class StreamingHistoryImporter
                     if ($archive && $existing->track_name === $entry['track'] && ($existing->release_name ?? '') === $entry['album']) {
                         $this->enrichExisting($existing, $entry, $appleMusic, $user, $matches);
                     }
+                    if ($existing->track_name === $entry['track'] && ($existing->release_name ?? '') === $entry['album']) {
+                        $catalogs = $this->catalogMatcher->imported($user, $source, $entry['uri'], $appleMusic ?? [],
+                            $entry['track'], $existing->artist_name, $entry['album'], $entry['duration_ms']);
+                        if ($catalogs !== []) {
+                            $metadata = $existing->track_metadata;
+                            $metadata['additional_info']['catalogs'] = $this->catalogMatcher->forListen($existing) + $catalogs;
+                            $existing->update(['track_metadata' => $metadata]);
+                        }
+                    }
                     $counts['duplicates']++;
 
                     continue;
@@ -80,6 +90,11 @@ class StreamingHistoryImporter
                 }
                 if ($archive && $appleMusic !== []) {
                     $additionalInfo['apple_music'] = $appleMusic;
+                }
+                $catalogs = $this->catalogMatcher->imported($user, $source, $entry['uri'], $appleMusic ?? [],
+                    $entry['track'], $artist, $entry['album'], $entry['duration_ms']);
+                if ($catalogs !== []) {
+                    $additionalInfo['catalogs'] = $catalogs;
                 }
                 if ($match !== null) {
                     $additionalInfo['recording_mbid'] = $match['recording_mbid'];

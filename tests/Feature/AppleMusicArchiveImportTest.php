@@ -92,6 +92,8 @@ class AppleMusicArchiveImportTest extends TestCase
         $listen = Listen::query()->sole();
         $this->assertSame('apple', $listen->source);
         $this->assertSame('Album artist', $listen->artist_name);
+        $this->assertSame('123456', $listen->track_metadata['additional_info']['catalogs']['apple']['id']);
+        $this->assertSame('Singer', $listen->track_metadata['additional_info']['catalogs']['apple']['artist_name']);
         $this->assertSame([
             'end_reason' => 'NATURAL_END_OF_TRACK',
             'start_position_ms' => 0,

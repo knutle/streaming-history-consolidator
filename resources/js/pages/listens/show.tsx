@@ -1,9 +1,10 @@
 import { Form, Head, Link, usePage } from '@inertiajs/react';
+import { useState } from 'react';
 import InputError from '@/components/input-error';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
-import { index, match, show } from '@/routes/listens';
+import { catalog, index, match, show } from '@/routes/listens';
 
 type Listen = {
     id: number;
@@ -48,6 +49,19 @@ type Props = {
     searchPage: number;
     hasMore: boolean;
     matchResult: number | null;
+    catalogResult: number | null;
+    musicBrainzSeed: string | null;
+    catalogs: Record<
+        string,
+        {
+            id: string;
+            track_name: string;
+            artist_name: string;
+            release_name: string | null;
+            duration_ms: number | null;
+            origin: 'import' | 'manual' | 'local';
+        }
+    >;
     suggestions: {
         recording_mbid: string;
         track_name: string;
@@ -64,6 +78,12 @@ function date(timestamp: number) {
     );
 }
 
+function catalogUrl(provider: 'apple' | 'spotify', id: string) {
+    return provider === 'spotify'
+        ? `https://open.spotify.com/track/${encodeURIComponent(id)}`
+        : `https://music.apple.com/us/song/${encodeURIComponent(id)}`;
+}
+
 export default function ListenDetails({
     listen,
     related,
@@ -74,7 +94,13 @@ export default function ListenDetails({
     hasMore,
     suggestions,
     matchResult,
+    catalogResult,
+    catalogs,
+    musicBrainzSeed,
 }: Props) {
+    const [selectedCatalog, setSelectedCatalog] = useState<'apple' | 'spotify'>(
+        'apple',
+    );
     const { errors } = usePage().props;
     const info = listen.track_metadata.additional_info;
     const apple = info.apple_music;
@@ -96,6 +122,8 @@ export default function ListenDetails({
     const musicSearch = encodeURIComponent(
         `${listen.track_name} ${listen.artist_name}`,
     );
+    const catalogMatch = catalogs[selectedCatalog];
+    const inputKey = `${listen.id}-${selectedCatalog}`;
 
     return (
         <>
@@ -117,6 +145,11 @@ export default function ListenDetails({
                     <p role="status" className="text-sm">
                         Identified {matchResult} matching listens. This choice
                         will also be used for future imports.
+                    </p>
+                )}
+                {catalogResult !== null && (
+                    <p role="status" className="text-sm">
+                        Catalog match saved for {catalogResult} listens.
                     </p>
                 )}
                 <section className="rounded-xl border p-5">
@@ -173,16 +206,6 @@ export default function ListenDetails({
                         ))}
                     </dl>
                     <div className="mt-4 flex flex-wrap gap-4 text-sm">
-                        {apple?.catalog_id && (
-                            <a
-                                className="underline"
-                                target="_blank"
-                                rel="noreferrer"
-                                href={`https://music.apple.com/us/song/${encodeURIComponent(apple.catalog_id)}`}
-                            >
-                                Apple Music track
-                            </a>
-                        )}
                         {listen.recording_mbid && (
                             <a
                                 className="underline"
@@ -214,22 +237,219 @@ export default function ListenDetails({
                                 MusicBrainz artist
                             </a>
                         ))}
-                        <a
-                            className="underline"
-                            target="_blank"
-                            rel="noreferrer"
-                            href={
-                                listen.source === 'spotify'
-                                    ? `https://open.spotify.com/search/${musicSearch}`
-                                    : `https://music.apple.com/us/search?term=${musicSearch}`
-                            }
-                        >
-                            Search{' '}
-                            {listen.source === 'spotify'
-                                ? 'Spotify'
-                                : 'Apple Music'}
-                        </a>
                     </div>
+                </section>
+                <section className="rounded-xl border p-5">
+                    <h2 className="text-lg font-semibold">Catalog matches</h2>
+                    <p className="mt-2 text-sm text-muted-foreground">
+                        Search a catalog, copy the track link, and confirm its
+                        metadata below. Imported track identifiers are matched
+                        locally; imports never contact external catalog APIs. An
+                        unambiguous catalog identifier from your other listens
+                        can also be linked through the same MusicBrainz
+                        recording. Manual choices are remembered for the same
+                        track, artist, and album.
+                    </p>
+                    <div className="mt-3 flex flex-wrap gap-4 text-sm">
+                        {(['spotify', 'apple'] as const).map((provider) => {
+                            const item = catalogs[provider];
+                            const name =
+                                provider === 'spotify'
+                                    ? 'Spotify'
+                                    : 'Apple Music';
+                            return (
+                                <div key={provider} className="space-y-1">
+                                    <div className="flex gap-2">
+                                        <a
+                                            className="underline"
+                                            target="_blank"
+                                            rel="noreferrer"
+                                            href={
+                                                provider === 'spotify'
+                                                    ? `https://open.spotify.com/search/results/${musicSearch}`
+                                                    : `https://music.apple.com/us/search?term=${musicSearch}`
+                                            }
+                                        >
+                                            Search {name}
+                                        </a>
+                                        {item && (
+                                            <a
+                                                className="underline"
+                                                target="_blank"
+                                                rel="noreferrer"
+                                                href={catalogUrl(
+                                                    provider,
+                                                    item.id,
+                                                )}
+                                            >
+                                                Matched {name} track
+                                            </a>
+                                        )}
+                                    </div>
+                                    {item && (
+                                        <p className="text-muted-foreground">
+                                            {item.track_name} ·{' '}
+                                            {item.artist_name}
+                                            {item.release_name
+                                                ? ` · ${item.release_name}`
+                                                : ''}{' '}
+                                            ({item.origin})
+                                        </p>
+                                    )}
+                                </div>
+                            );
+                        })}
+                    </div>
+                    <Form
+                        {...catalog.form(listen.id)}
+                        className="mt-4 grid gap-3 sm:grid-cols-2"
+                    >
+                        {({ errors, processing, clearErrors }) => (
+                            <>
+                                <div className="grid gap-2">
+                                    <Label htmlFor="catalog-provider">
+                                        Catalog
+                                    </Label>
+                                    <select
+                                        id="catalog-provider"
+                                        name="provider"
+                                        className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+                                        value={selectedCatalog}
+                                        onChange={(event) => {
+                                            setSelectedCatalog(
+                                                event.target.value === 'spotify'
+                                                    ? 'spotify'
+                                                    : 'apple',
+                                            );
+                                            clearErrors();
+                                        }}
+                                    >
+                                        <option value="apple">
+                                            Apple Music
+                                        </option>
+                                        <option value="spotify">Spotify</option>
+                                    </select>
+                                    <InputError message={errors.provider} />
+                                </div>
+                                <div className="grid gap-2">
+                                    <Label htmlFor="catalog-url">
+                                        Track link
+                                    </Label>
+                                    <Input
+                                        key={inputKey}
+                                        id="catalog-url"
+                                        name="catalog_url"
+                                        defaultValue={
+                                            catalogMatch
+                                                ? catalogUrl(
+                                                      selectedCatalog,
+                                                      catalogMatch.id,
+                                                  )
+                                                : ''
+                                        }
+                                        required
+                                        maxLength={2048}
+                                    />
+                                    <InputError message={errors.catalog_url} />
+                                </div>
+                                <div className="grid gap-2">
+                                    <Label htmlFor="catalog-track">
+                                        Catalog track name
+                                    </Label>
+                                    <Input
+                                        key={inputKey}
+                                        id="catalog-track"
+                                        name="catalog_track"
+                                        defaultValue={
+                                            catalogMatch?.track_name ??
+                                            listen.track_name
+                                        }
+                                        required
+                                        maxLength={255}
+                                    />
+                                    <InputError
+                                        message={errors.catalog_track}
+                                    />
+                                </div>
+                                <div className="grid gap-2">
+                                    <Label htmlFor="catalog-artist">
+                                        Catalog artist
+                                    </Label>
+                                    <Input
+                                        key={inputKey}
+                                        id="catalog-artist"
+                                        name="catalog_artist"
+                                        defaultValue={
+                                            catalogMatch?.artist_name ??
+                                            (listen.artist_name ===
+                                            'Unknown artist'
+                                                ? ''
+                                                : listen.artist_name)
+                                        }
+                                        required
+                                        maxLength={255}
+                                    />
+                                    <InputError
+                                        message={errors.catalog_artist}
+                                    />
+                                </div>
+                                <div className="grid gap-2">
+                                    <Label htmlFor="catalog-album">
+                                        Catalog album
+                                    </Label>
+                                    <Input
+                                        key={inputKey}
+                                        id="catalog-album"
+                                        name="catalog_album"
+                                        defaultValue={
+                                            catalogMatch
+                                                ? (catalogMatch.release_name ??
+                                                  '')
+                                                : (listen.release_name ?? '')
+                                        }
+                                        maxLength={255}
+                                    />
+                                    <InputError
+                                        message={errors.catalog_album}
+                                    />
+                                </div>
+                                <div className="grid gap-2">
+                                    <Label htmlFor="catalog-duration">
+                                        Track duration (milliseconds)
+                                    </Label>
+                                    <Input
+                                        key={inputKey}
+                                        id="catalog-duration"
+                                        name="catalog_duration"
+                                        type="number"
+                                        min={1}
+                                        max={86400000}
+                                        defaultValue={
+                                            catalogMatch
+                                                ? (catalogMatch.duration_ms ??
+                                                  '')
+                                                : (info.duration_ms ?? '')
+                                        }
+                                    />
+                                    <InputError
+                                        message={errors.catalog_duration}
+                                    />
+                                </div>
+                                <div>
+                                    <Button disabled={processing}>
+                                        Save catalog match
+                                    </Button>
+                                </div>
+                            </>
+                        )}
+                    </Form>
+                    {(listen.artist_name === 'Unknown artist' ||
+                        !listen.release_name) && (
+                        <p className="mt-3 text-sm text-muted-foreground">
+                            This listen lacks an artist or album, so this choice
+                            will apply only to this listen.
+                        </p>
+                    )}
                 </section>
                 {listen.recording_mbid === null && (
                     <section className="rounded-xl border p-5">
@@ -242,6 +462,22 @@ export default function ListenDetails({
                             it for future imports. Existing matched listens are
                             not changed.
                         </p>
+                        {musicBrainzSeed && (
+                            <p className="mt-3 text-sm">
+                                Missing from MusicBrainz?{' '}
+                                <a
+                                    className="underline"
+                                    href={musicBrainzSeed}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                >
+                                    Open a prefilled recording editor
+                                </a>
+                                . Review the metadata and submit using your
+                                MusicBrainz account. Source links are included
+                                in the edit note for verification.
+                            </p>
+                        )}
                         {!musicbrainzEnabled ? (
                             <p className="mt-3 text-sm">
                                 MusicBrainz matching is disabled. Set up the

@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Http\Requests\ImportListensRequest;
 use App\Models\Listen;
+use App\Services\CatalogMatcher;
 use App\Services\ManualListenMatcher;
 use App\Services\MusicBrainzMatcher;
 use App\Services\StreamingHistoryImporter;
@@ -73,7 +74,7 @@ class ListenController extends Controller
         return to_route('profile.edit')->with('import_result', $result);
     }
 
-    public function show(Request $request, int $listen, MusicBrainzMatcher $matcher): Response
+    public function show(Request $request, int $listen, MusicBrainzMatcher $matcher, CatalogMatcher $catalogMatcher): Response
     {
         $values = $request->validate([
             'q' => ['nullable', 'string', 'max:255'],
@@ -102,7 +103,32 @@ class ListenController extends Controller
             'hasMore' => $candidates['hasMore'],
             'suggestions' => $candidates['results'],
             'matchResult' => $request->session()->get('match_result'),
+            'catalogResult' => $request->session()->get('catalog_result'),
+            'catalogs' => $catalogMatcher->forListen($item, includeRelated: true),
+            'musicBrainzSeed' => $item->recording_mbid === null ? $catalogMatcher->musicBrainzSeed($item) : null,
         ]);
+    }
+
+    public function matchCatalog(Request $request, int $listen, CatalogMatcher $matcher): RedirectResponse
+    {
+        $item = Listen::query()->where('user_id', $request->user()->id)->findOrFail($listen);
+        $values = $request->validate([
+            'provider' => ['required', Rule::in(['apple', 'spotify'])],
+            'catalog_url' => ['required', 'string', 'max:2048'],
+            'catalog_track' => ['required', 'string', 'max:255'],
+            'catalog_artist' => ['required', 'string', 'max:255'],
+            'catalog_album' => ['nullable', 'string', 'max:255'],
+            'catalog_duration' => ['nullable', 'integer', 'min:1', 'max:86400000'],
+        ]);
+        $id = $matcher->identifier($values['provider'], $values['catalog_url']);
+        if ($id === null) {
+            throw ValidationException::withMessages(['catalog_url' => 'Enter a valid track link for the selected catalog.']);
+        }
+        $match = $matcher->match($values['provider'], $id, $values['catalog_track'], $values['catalog_artist'],
+            $values['catalog_album'] ?? null, isset($values['catalog_duration']) ? (int) $values['catalog_duration'] : null, 'manual');
+        $count = $matcher->remember($request->user(), $item, $match);
+
+        return to_route('listens.show', $item->id)->with('catalog_result', $count);
     }
 
     public function match(Request $request, int $listen, MusicBrainzMatcher $matcher, ManualListenMatcher $manualMatcher): RedirectResponse

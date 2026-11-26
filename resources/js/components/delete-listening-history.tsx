@@ -49,8 +49,8 @@ export default function DeleteListeningHistory() {
                         <DialogDescription>
                             This cannot be undone. All of your imported listens
                             will be removed, but you can import your files
-                            again. Remembered recording choices will be kept for
-                            future imports.
+                            again. Remembered recording and catalog choices will
+                            be kept for future imports.
                         </DialogDescription>
                         <Form
                             {...destroy.form()}

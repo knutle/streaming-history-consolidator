@@ -12,6 +12,7 @@ Route::middleware(['auth', 'verified'])->group(function () {
     Route::post('listens/import', [ListenController::class, 'store'])->name('listens.import');
     Route::get('listens/{listen}', [ListenController::class, 'show'])->name('listens.show');
     Route::post('listens/{listen}/match', [ListenController::class, 'match'])->name('listens.match');
+    Route::post('listens/{listen}/catalog', [ListenController::class, 'matchCatalog'])->name('listens.catalog');
 });
 
 require __DIR__.'/settings.php';
