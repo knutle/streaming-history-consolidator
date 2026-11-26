@@ -1,4 +1,5 @@
 import { Form } from '@inertiajs/react';
+import { useState } from 'react';
 import Heading from '@/components/heading';
 import InputError from '@/components/input-error';
 import { Button } from '@/components/ui/button';
@@ -21,6 +22,8 @@ export default function ImportHistory({
     importResult,
     canImport,
 }: Props) {
+    const [source, setSource] = useState('spotify');
+
     return (
         <section className="space-y-4">
             <Heading
@@ -29,17 +32,19 @@ export default function ImportHistory({
                 description="Import your Spotify or Apple Music listening history"
             />
             <p className="text-sm text-muted-foreground">
-                Upload a Spotify extended history JSON file or an Apple Music
-                Play Activity CSV. Re-imports skip previously processed events.
-                Apple playback events are imported individually, not combined
-                into listening sessions.
+                Upload Spotify extended history, an Apple Music Play Activity
+                CSV, or a full Apple Media Services ZIP. ZIP imports use
+                unambiguous library and daily track metadata to enrich plays.
+                Re-imports skip previously processed events. Apple playback
+                events are imported individually, not combined into sessions.
             </p>
             {!musicbrainzEnabled && (
                 <p className="text-sm text-amber-700 dark:text-amber-400">
                     MusicBrainz matching is disabled. Run{' '}
                     <code>php artisan musicbrainz:setup</code> locally or
                     configure an existing database before importing. Previously
-                    imported listens are not rematched on re-import.
+                    CSV re-imports do not rematch existing listens; Apple ZIP
+                    imports can enrich and rematch previously unmatched listens.
                 </p>
             )}
             {importResult && (
@@ -62,20 +67,35 @@ export default function ImportHistory({
                                     id="import-source"
                                     name="source"
                                     className="h-9 w-full rounded-md border border-input bg-background px-3 text-sm shadow-xs"
-                                    defaultValue="spotify"
+                                    value={source}
+                                    onChange={(event) =>
+                                        setSource(event.target.value)
+                                    }
                                 >
                                     <option value="spotify">Spotify</option>
-                                    <option value="apple">Apple Music</option>
+                                    <option value="apple">
+                                        Apple Music CSV
+                                    </option>
+                                    <option value="apple_zip">
+                                        Apple Media Services ZIP
+                                    </option>
                                 </select>
                                 <InputError message={errors.source} />
                             </div>
                             <div className="grid min-w-64 flex-1 gap-2">
                                 <Label htmlFor="file">History file</Label>
                                 <Input
+                                    key={source}
                                     id="file"
                                     name="file"
                                     type="file"
-                                    accept=".json,.csv,application/json,text/csv"
+                                    accept={
+                                        source === 'spotify'
+                                            ? '.json,application/json'
+                                            : source === 'apple'
+                                              ? '.csv,text/csv'
+                                              : '.zip,application/zip'
+                                    }
                                     required
                                 />
                                 <InputError message={errors.file} />

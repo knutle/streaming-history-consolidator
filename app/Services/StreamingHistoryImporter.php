@@ -5,6 +5,7 @@ namespace App\Services;
 use App\Models\Listen;
 use App\Models\User;
 use Carbon\CarbonImmutable;
+use Generator;
 use Illuminate\Database\QueryException;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\ValidationException;
@@ -15,17 +16,26 @@ class StreamingHistoryImporter
         private StreamingHistoryReader $reader,
         private MusicBrainzMatcher $matcher,
         private ManualListenMatcher $manualMatcher,
+        private AppleMusicArchiveReader $archiveReader,
     ) {}
 
     /** @return array{imported: int, duplicates: int, matched: int} */
     public function import(User $user, string $source, string $path): array
     {
-        return DB::transaction(function () use ($user, $source, $path) {
+        $archive = $source === 'apple_zip';
+        $source = $archive ? 'apple' : $source;
+
+        return DB::transaction(function () use ($user, $source, $path, $archive) {
             DB::table('users')->where('id', $user->id)->lockForUpdate()->first();
             $counts = ['imported' => 0, 'duplicates' => 0, 'matched' => 0];
             $matches = [];
 
-            foreach ($this->reader->read($path, $source) as $entry) {
+            $entries = $this->entries($path, $source, $archive);
+            foreach ($entries as $entry) {
+                $appleMusic = $entry['apple_music'] ?? null;
+                if ($archive && $appleMusic === null) {
+                    throw new \LogicException('The Apple archive reader returned an invalid entry.');
+                }
                 $identityValues = $source === 'apple' && $entry['uri'] !== ''
                     ? ['event_id', $entry['uri']]
                     : [
@@ -34,7 +44,11 @@ class StreamingHistoryImporter
                     ];
                 $fingerprint = hash('sha256', json_encode($identityValues, JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE));
                 $identity = ['user_id' => $user->id, 'source' => $source, 'fingerprint' => $fingerprint];
-                if (Listen::query()->where($identity)->exists()) {
+                $existing = Listen::query()->where($identity)->first();
+                if ($existing !== null) {
+                    if ($archive && $existing->track_name === $entry['track'] && ($existing->release_name ?? '') === $entry['album']) {
+                        $this->enrichExisting($existing, $entry, $appleMusic, $user, $matches);
+                    }
                     $counts['duplicates']++;
 
                     continue;
@@ -64,6 +78,9 @@ class StreamingHistoryImporter
                 if ($entry['duration_ms'] !== null && $entry['duration_ms'] > 0) {
                     $additionalInfo['duration_ms'] = $entry['duration_ms'];
                 }
+                if ($archive && $appleMusic !== []) {
+                    $additionalInfo['apple_music'] = $appleMusic;
+                }
                 if ($match !== null) {
                     $additionalInfo['recording_mbid'] = $match['recording_mbid'];
                     if ($match['artist_mbids'] !== []) {
@@ -72,6 +89,7 @@ class StreamingHistoryImporter
                     if ($match['release_mbid'] !== null) {
                         $additionalInfo['release_mbid'] = $match['release_mbid'];
                     }
+
                 }
                 $metadata = [
                     'artist_name' => $artist,
@@ -109,5 +127,68 @@ class StreamingHistoryImporter
 
             return $counts;
         });
+    }
+
+    /**
+     * @return Generator<int, array{timestamp: string, track: string, artist: string, identity_artist?: string, album: string, played_ms: int, duration_ms: ?int, uri: string, start_time: bool, apple_music?: array<string, mixed>}>
+     */
+    private function entries(string $path, string $source, bool $archive): Generator
+    {
+        if ($archive) {
+            yield from $this->archiveReader->read($path);
+        } else {
+            yield from $this->reader->read($path, $source);
+        }
+    }
+
+    /**
+     * @param  array{track: string, artist: string, album: string}  $entry
+     * @param  array<string, mixed>  $appleMusic
+     * @param  array<string, mixed>  $matches
+     */
+    private function enrichExisting(Listen $listen, array $entry, array $appleMusic, User $user, array &$matches): void
+    {
+        $metadata = $listen->track_metadata;
+        $existing = $metadata['additional_info']['apple_music'] ?? [];
+        if (! is_array($existing)) {
+            throw ValidationException::withMessages(['file' => 'An existing listen has invalid Apple Music metadata.']);
+        }
+        $metadata['additional_info']['apple_music'] = $existing + $appleMusic;
+        $artist = $listen->artist_name;
+        if ($artist === 'Unknown artist' && $entry['artist'] !== '' && $listen->recording_mbid === null) {
+            $artist = $entry['artist'];
+            $metadata['artist_name'] = $artist;
+        }
+        $match = null;
+        if ($listen->recording_mbid === null && $artist !== 'Unknown artist') {
+            $key = json_encode([$entry['track'], $artist, $entry['album']], JSON_THROW_ON_ERROR);
+            if (! array_key_exists($key, $matches)) {
+                try {
+                    $matches[$key] = $this->manualMatcher->remembered($user, $entry['track'], $artist)
+                        ?? $this->matcher->match($entry['track'], $artist, $entry['album']);
+                } catch (QueryException $exception) {
+                    report($exception);
+
+                    throw ValidationException::withMessages([
+                        'file' => 'The local MusicBrainz database could not be queried. Check its connection and schema; nothing was imported.',
+                    ]);
+                }
+            }
+            $match = $matches[$key];
+            if ($match !== null) {
+                $metadata['additional_info']['recording_mbid'] = $match['recording_mbid'];
+                if ($match['artist_mbids'] !== []) {
+                    $metadata['additional_info']['artist_mbids'] = $match['artist_mbids'];
+                }
+                if ($match['release_mbid'] !== null) {
+                    $metadata['additional_info']['release_mbid'] = $match['release_mbid'];
+                }
+            }
+        }
+        $listen->update([
+            'artist_name' => $artist,
+            'recording_mbid' => $match['recording_mbid'] ?? $listen->recording_mbid,
+            'track_metadata' => $metadata,
+        ]);
     }
 }

@@ -19,6 +19,22 @@ type Listen = {
             duration_ms?: number;
             artist_mbids?: string[];
             release_mbid?: string;
+            apple_music?: {
+                catalog_id?: string;
+                track_artist?: string;
+                album_artist?: string;
+                genre?: string;
+                release_date?: string;
+                track_number?: number;
+                disc_number?: number;
+                end_reason?: string;
+                source_type?: string;
+                offline?: string;
+                shuffle?: string;
+                repeat?: string;
+                start_position_ms?: number;
+                end_position_ms?: number;
+            };
         };
     };
 };
@@ -61,6 +77,22 @@ export default function ListenDetails({
 }: Props) {
     const { errors } = usePage().props;
     const info = listen.track_metadata.additional_info;
+    const apple = info.apple_music;
+    const appleDetails = [
+        { label: 'Track artist', value: apple?.track_artist },
+        { label: 'Album artist', value: apple?.album_artist },
+        { label: 'Genre', value: apple?.genre },
+        { label: 'Release date', value: apple?.release_date },
+        { label: 'Track number', value: apple?.track_number },
+        { label: 'Disc number', value: apple?.disc_number },
+        { label: 'End reason', value: apple?.end_reason },
+        { label: 'Source type', value: apple?.source_type },
+        { label: 'Offline', value: apple?.offline },
+        { label: 'Shuffle', value: apple?.shuffle },
+        { label: 'Repeat', value: apple?.repeat },
+        { label: 'Start position (ms)', value: apple?.start_position_ms },
+        { label: 'End position (ms)', value: apple?.end_position_ms },
+    ].filter(({ value }) => value != null && value !== '');
     const musicSearch = encodeURIComponent(
         `${listen.track_name} ${listen.artist_name}`,
     );
@@ -131,8 +163,26 @@ export default function ListenDetails({
                                     : 'Unmatched'}
                             </dd>
                         </div>
+                        {appleDetails.map(({ label, value }) => (
+                            <div key={label}>
+                                <dt className="text-muted-foreground">
+                                    {label}
+                                </dt>
+                                <dd>{value}</dd>
+                            </div>
+                        ))}
                     </dl>
                     <div className="mt-4 flex flex-wrap gap-4 text-sm">
+                        {apple?.catalog_id && (
+                            <a
+                                className="underline"
+                                target="_blank"
+                                rel="noreferrer"
+                                href={`https://music.apple.com/us/song/${encodeURIComponent(apple.catalog_id)}`}
+                            >
+                                Apple Music track
+                            </a>
+                        )}
                         {listen.recording_mbid && (
                             <a
                                 className="underline"

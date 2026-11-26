@@ -32,8 +32,36 @@ class StreamingHistoryReader
      */
     private function spotify($file): Generator
     {
+        foreach ($this->jsonObjects($file) as $row) {
+            if (! array_key_exists('master_metadata_track_name', $row) || ! array_key_exists('ms_played', $row) || ! array_key_exists('ts', $row)) {
+                $this->invalid('The file is not a Spotify extended streaming history export.');
+            }
+            if ($row['master_metadata_track_name'] === null) {
+                continue;
+            }
+            $track = $this->text($row['master_metadata_track_name']);
+            $artist = $this->text($row['master_metadata_album_artist_name'] ?? '');
+            $album = $this->text($row['master_metadata_album_album_name'] ?? '');
+            $uri = $this->text($row['spotify_track_uri'] ?? '');
+            $played = $this->milliseconds($row['ms_played']);
+            $timestamp = $this->timestamp($row['ts']);
+            if ($track === '') {
+                $this->invalid('A Spotify entry has an empty track name.');
+            }
+            if ($played > 0) {
+                yield ['timestamp' => $timestamp, 'track' => $track, 'artist' => $artist, 'album' => $album, 'played_ms' => $played, 'duration_ms' => null, 'uri' => $uri, 'start_time' => false];
+            }
+        }
+    }
+
+    /**
+     * @param  resource  $file
+     * @return Generator<int, array<string, mixed>>
+     */
+    public function jsonObjects($file): Generator
+    {
         if ($this->nextNonWhitespace($file) !== '[') {
-            $this->invalid('Expected a Spotify extended history JSON array.');
+            $this->invalid('Expected a JSON array.');
         }
 
         $first = true;
@@ -52,7 +80,7 @@ class StreamingHistoryReader
                 $char = $this->nextNonWhitespace($file);
             }
             if ($char !== '{') {
-                $this->invalid('Each Spotify history entry must be an object.');
+                $this->invalid('Each JSON array entry must be an object.');
             }
 
             $json = '{';
@@ -62,7 +90,7 @@ class StreamingHistoryReader
             while ($depth > 0 && ($char = fgetc($file)) !== false) {
                 $json .= $char;
                 if (strlen($json) > 1024 * 1024) {
-                    $this->invalid('A Spotify history entry is too large.');
+                    $this->invalid('A JSON array entry is too large.');
                 }
                 if ($inString) {
                     if ($escaped) {
@@ -81,46 +109,32 @@ class StreamingHistoryReader
                 }
             }
             if ($depth !== 0) {
-                $this->invalid('The Spotify JSON file is incomplete.');
+                $this->invalid('The JSON file is incomplete.');
             }
             try {
                 $row = json_decode($json, true, 512, JSON_THROW_ON_ERROR);
             } catch (JsonException) {
-                $this->invalid('A Spotify history entry contains invalid JSON.');
+                $this->invalid('A JSON array entry contains invalid JSON.');
             }
-            if (! is_array($row) || ! array_key_exists('master_metadata_track_name', $row) || ! array_key_exists('ms_played', $row) || ! array_key_exists('ts', $row)) {
-                $this->invalid('The file is not a Spotify extended streaming history export.');
+            if (! is_array($row)) {
+                $this->invalid('Each JSON array entry must be an object.');
             }
             $first = false;
-            if ($row['master_metadata_track_name'] === null) {
-                continue;
-            }
-            $track = $this->text($row['master_metadata_track_name']);
-            $artist = $this->text($row['master_metadata_album_artist_name'] ?? '');
-            $album = $this->text($row['master_metadata_album_album_name'] ?? '');
-            $uri = $this->text($row['spotify_track_uri'] ?? '');
-            $played = $this->milliseconds($row['ms_played']);
-            $timestamp = $this->timestamp($row['ts']);
-            if ($track === '') {
-                $this->invalid('A Spotify entry has an empty track name.');
-            }
-            if ($played > 0) {
-                yield ['timestamp' => $timestamp, 'track' => $track, 'artist' => $artist, 'album' => $album, 'played_ms' => $played, 'duration_ms' => null, 'uri' => $uri, 'start_time' => false];
-            }
+            yield $row;
         }
 
         if ($this->nextNonWhitespace($file) !== false) {
-            $this->invalid('Unexpected data after the Spotify JSON array.');
+            $this->invalid('Unexpected data after the JSON array.');
         }
     }
 
     /**
      * @param  resource  $file
-     * @return Generator<int, array{timestamp: string, track: string, artist: string, identity_artist: string, album: string, played_ms: int, duration_ms: ?int, uri: string, start_time: bool}>
+     * @return Generator<int, array{timestamp: string, track: string, artist: string, identity_artist: string, album: string, played_ms: int, duration_ms: ?int, uri: string, start_time: bool, apple_event: array<string, mixed>}>
      */
-    private function apple($file): Generator
+    public function apple($file, bool $includeDetails = false): Generator
     {
-        $headers = fgetcsv($file, escape: '');
+        $headers = $includeDetails ? $this->boundedCsvRow($file) : fgetcsv($file, escape: '');
         if ($headers === false) {
             $this->invalid('The Apple Music CSV file is empty.');
         }
@@ -129,7 +143,7 @@ class StreamingHistoryReader
         if (count($headers) !== count(array_unique($headers)) || ! in_array('Song Name', $headers, true) || ! in_array('Play Duration Milliseconds', $headers, true) || (! in_array('Event Start Timestamp', $headers, true) && ! in_array('Event End Timestamp', $headers, true))) {
             $this->invalid('Expected an Apple Music Play Activity CSV with song, timestamp, and play duration columns.');
         }
-        while (($values = fgetcsv($file, escape: '')) !== false) {
+        while (($values = $includeDetails ? $this->boundedCsvRow($file) : fgetcsv($file, escape: '')) !== false) {
             if ($values === [null]) {
                 continue;
             }
@@ -165,6 +179,19 @@ class StreamingHistoryReader
             if ($albumArtist === '') {
                 $albumArtist = $this->text($row['Album Artist'] ?? '');
             }
+            $eventDetails = [];
+            if ($includeDetails) {
+                foreach (['End Reason Type' => 'end_reason', 'Source Type' => 'source_type', 'Offline' => 'offline', 'Shuffle Play' => 'shuffle', 'Repeat Play' => 'repeat'] as $column => $key) {
+                    if (isset($row[$column]) && trim((string) $row[$column]) !== '') {
+                        $eventDetails[$key] = $this->text($row[$column]);
+                    }
+                }
+                foreach (['Start Position In Milliseconds' => 'start_position_ms', 'End Position In Milliseconds' => 'end_position_ms'] as $column => $key) {
+                    if (isset($row[$column]) && trim((string) $row[$column]) !== '') {
+                        $eventDetails[$key] = $this->milliseconds(trim((string) $row[$column]));
+                    }
+                }
+            }
             yield [
                 'timestamp' => $timestamp,
                 'track' => $track,
@@ -176,8 +203,61 @@ class StreamingHistoryReader
                 'duration_ms' => $duration === '' ? null : $this->milliseconds($duration),
                 'uri' => $this->text($row['Event ID'] ?? ''),
                 'start_time' => $start !== '',
+                'apple_event' => $eventDetails,
             ];
         }
+    }
+
+    /**
+     * @param  resource  $file
+     * @return array<int, string|null>|false
+     */
+    public function boundedCsvRow($file): array|false
+    {
+        $record = '';
+        $inQuotes = false;
+        $pendingQuote = false;
+        $fieldStart = true;
+        while (($chunk = fgets($file, 65536)) !== false) {
+            $record .= $chunk;
+            if (strlen($record) > 1024 * 1024) {
+                $this->invalid('An Apple CSV record is too large.');
+            }
+            $length = strlen($chunk);
+            for ($i = 0; $i < $length; $i++) {
+                $char = $chunk[$i];
+                if ($pendingQuote) {
+                    $pendingQuote = false;
+                    if ($char === '"') {
+                        continue;
+                    }
+                    $inQuotes = false;
+                }
+                if ($inQuotes) {
+                    if ($char === '"') {
+                        $pendingQuote = true;
+                    }
+                } elseif ($fieldStart && $char === '"') {
+                    $inQuotes = true;
+                    $fieldStart = false;
+                } elseif ($char === ',') {
+                    $fieldStart = true;
+                } elseif ($char !== ' ' && $char !== "\t") {
+                    $fieldStart = false;
+                }
+            }
+            if (str_ends_with($chunk, "\n") && (! $inQuotes || $pendingQuote)) {
+                return str_getcsv($record, escape: '');
+            }
+        }
+        if ($record === '') {
+            return false;
+        }
+        if ($inQuotes && ! $pendingQuote) {
+            $this->invalid('An Apple CSV record is incomplete.');
+        }
+
+        return str_getcsv($record, escape: '');
     }
 
     private function text(mixed $value): string
