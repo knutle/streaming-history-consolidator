@@ -12,10 +12,13 @@ class CatalogMatcher
     /** @var array<string, array<string, array<string, mixed>>> */
     private array $remembered = [];
 
+    /** @var array<string, array<string, mixed>> */
+    private array $metadataCache = [];
+
     /**
-     * @return array{provider: string, id: string, track_name: string, artist_name: string, release_name: ?string, duration_ms: ?int, origin: string}
+     * @return array{provider: string, id: string, track_name: string, artist_name: string, release_name: ?string, duration_ms: ?int, origin: string, isrc: ?string}
      */
-    public function match(string $provider, string $id, string $track, string $artist, ?string $album, ?int $duration, string $origin): array
+    public function match(string $provider, string $id, string $track, string $artist, ?string $album, ?int $duration, string $origin, ?string $isrc = null): array
     {
         return [
             'provider' => $provider,
@@ -25,7 +28,73 @@ class CatalogMatcher
             'release_name' => $album,
             'duration_ms' => $duration,
             'origin' => $origin,
+            'isrc' => $isrc,
         ];
+    }
+
+    /**
+     * @param  array<string, mixed>  $match
+     * @param  array<string, mixed>  $extra
+     */
+    public function storeMetadata(int $userId, array $match, array $extra = [], bool $overwriteManual = true): void
+    {
+        $provider = $match['provider'] ?? null;
+        $id = $match['id'] ?? null;
+        $origin = $match['origin'] ?? null;
+        if (! is_string($provider) || ! in_array($provider, ['spotify', 'apple'], true) || ! is_string($id)
+            || $this->identifier($provider, $this->url($provider, $id)) !== $id
+            || ! in_array($origin, ['import', 'manual', 'local'], true)) {
+            throw new \UnexpectedValueException('Invalid catalog match metadata.');
+        }
+        if ($origin === 'local') {
+            return;
+        }
+        $key = ['user_id' => $userId, 'catalog_key' => hash('sha256', $provider.':'.$id)];
+        $row = DB::table('catalog_track_metadata')->where($key)->first();
+        $stored = $row === null ? ['values' => [], 'origins' => []] : json_decode($row->metadata, true, 512, JSON_THROW_ON_ERROR);
+        foreach (['track_name', 'artist_name', 'release_name', 'duration_ms', 'isrc', 'album_artist', 'genre', 'release_date', 'track_number', 'disc_number'] as $field) {
+            $value = $match[$field] ?? $extra[$field] ?? null;
+            if ($value === null || $value === '' || ($field === 'artist_name' && $value === 'Unknown artist')) {
+                continue;
+            }
+            if ($field === 'isrc') {
+                $value = Isrc::normalize($value);
+                if ($value === null) {
+                    throw new \UnexpectedValueException('Invalid ISRC in catalog metadata.');
+                }
+            }
+            if (! isset($stored['values'][$field])
+                || ($origin === 'manual' && ($overwriteManual || ($stored['origins'][$field] ?? null) !== 'manual'))) {
+                $stored['values'][$field] = $value;
+                $stored['origins'][$field] = $origin;
+            }
+        }
+        $encoded = json_encode($stored, JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE);
+        if ($row === null) {
+            DB::table('catalog_track_metadata')->insert($key + [
+                'provider' => $provider, 'catalog_id' => $id,
+                'metadata' => $encoded, 'created_at' => now(), 'updated_at' => now(),
+            ]);
+            unset($this->metadataCache[$userId.':'.$key['catalog_key']]);
+        } elseif ($row->metadata !== $encoded) {
+            DB::table('catalog_track_metadata')->where($key)->update(['metadata' => $encoded, 'updated_at' => now()]);
+            unset($this->metadataCache[$userId.':'.$key['catalog_key']]);
+        }
+    }
+
+    /** @param array<string, mixed> $match
+     * @return array<string, mixed>
+     */
+    private function withMetadata(int $userId, array $match): array
+    {
+        $key = hash('sha256', $match['provider'].':'.$match['id']);
+        $cacheKey = $userId.':'.$key;
+        if (! array_key_exists($cacheKey, $this->metadataCache)) {
+            $row = DB::table('catalog_track_metadata')->where(['user_id' => $userId, 'catalog_key' => $key])->value('metadata');
+            $this->metadataCache[$cacheKey] = $row === null ? [] : json_decode($row, true, 512, JSON_THROW_ON_ERROR)['values'];
+        }
+
+        return array_replace($match + ['isrc' => null], $this->metadataCache[$cacheKey]);
     }
 
     public function identifier(string $provider, string $value): ?string
@@ -98,7 +167,7 @@ class CatalogMatcher
      * @param  array<string, mixed>  $appleMusic
      * @return array<string, array<string, mixed>>
      */
-    public function imported(User $user, string $source, string $uri, array $appleMusic, string $track, string $artist, ?string $album, ?int $duration): array
+    public function imported(User $user, string $source, string $uri, array $appleMusic, string $track, string $artist, ?string $album, ?int $duration, ?string $isrc = null): array
     {
         $catalogs = [];
         $id = $source === 'spotify' ? $this->identifier('spotify', $uri) : ($appleMusic['catalog_id'] ?? null);
@@ -108,14 +177,19 @@ class CatalogMatcher
         if (is_string($id)) {
             $catalogArtist = $source === 'apple' && is_string($appleMusic['track_artist'] ?? null)
                 ? $appleMusic['track_artist'] : $artist;
-            $catalogs[$source] = $this->match($source, $id, $track, $catalogArtist, $album, $duration, 'import');
+            $catalogs[$source] = $this->match($source, $id, $track, $catalogArtist, $album, $duration, 'import', $isrc);
+            $this->storeMetadata($user->id, $catalogs[$source], $appleMusic);
         }
 
-        return $catalogs + $this->remembered($user, $track, $artist, $album);
+        foreach ($catalogs + $this->remembered($user, $track, $artist, $album) as $provider => $match) {
+            $catalogs[$provider] = $this->withMetadata($user->id, $match);
+        }
+
+        return $catalogs;
     }
 
     /** @return array<string, array<string, mixed>> */
-    public function forListen(Listen $listen, bool $includeRelated = false): array
+    public function forListen(Listen $listen, bool $includeRelated = false, bool $includeStored = true): array
     {
         $catalogs = $listen->track_metadata['additional_info']['catalogs'] ?? [];
         $apple = $listen->track_metadata['additional_info']['apple_music'] ?? [];
@@ -124,7 +198,13 @@ class CatalogMatcher
             $duration = $listen->track_metadata['additional_info']['duration_ms'] ?? null;
             $artist = is_string($apple['track_artist'] ?? null) ? $apple['track_artist'] : $listen->artist_name;
             $catalogs['apple'] = $this->match('apple', $apple['catalog_id'], $listen->track_name,
-                $artist, $listen->release_name, is_int($duration) ? $duration : null, 'import');
+                $artist, $listen->release_name, is_int($duration) ? $duration : null, 'import',
+                is_string($apple['isrc'] ?? null) ? $apple['isrc'] : null);
+        }
+        if ($includeStored) {
+            foreach ($catalogs as $provider => $match) {
+                $catalogs[$provider] = $this->withMetadata($listen->user_id, $match);
+            }
         }
         if ($includeRelated && $listen->recording_mbid !== null && (! isset($catalogs['apple']) || ! isset($catalogs['spotify']))) {
             $candidates = ['apple' => [], 'spotify' => []];
@@ -174,6 +254,9 @@ class CatalogMatcher
         foreach (['apple', 'spotify'] as $provider) {
             if (isset($catalogs[$provider]['id']) && is_string($catalogs[$provider]['id'])) {
                 $sources[] = $this->url($provider, $catalogs[$provider]['id']);
+                if (is_string($catalogs[$provider]['isrc'] ?? null)) {
+                    $sources[] = ucfirst($provider).' catalog ISRC: '.$catalogs[$provider]['isrc'];
+                }
             }
         }
         $params['edit-recording.edit_note'] = "Sources to review:\n".implode("\n", $sources);
@@ -190,6 +273,7 @@ class CatalogMatcher
             if ($current === null) {
                 throw ValidationException::withMessages(['catalog_url' => 'This listen has been deleted.']);
             }
+            $this->storeMetadata($user->id, $match);
             $key = $this->key($current->track_name, $current->artist_name, $current->release_name);
             if ($key !== null) {
                 DB::table('catalog_matches')->updateOrInsert(

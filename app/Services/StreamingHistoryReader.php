@@ -10,7 +10,7 @@ use JsonException;
 class StreamingHistoryReader
 {
     /**
-     * @return Generator<int, array{timestamp: string, track: string, artist: string, identity_artist?: string, album: string, played_ms: int, duration_ms: ?int, uri: string, start_time: bool}>
+     * @return Generator<int, array{timestamp: string, track: string, artist: string, identity_artist?: string, album: string, played_ms: int, duration_ms: ?int, uri: string, start_time: bool, isrc: ?string}>
      */
     public function read(string $path, string $source): Generator
     {
@@ -28,7 +28,7 @@ class StreamingHistoryReader
 
     /**
      * @param  resource  $file
-     * @return Generator<int, array{timestamp: string, track: string, artist: string, album: string, played_ms: int, duration_ms: ?int, uri: string, start_time: bool}>
+     * @return Generator<int, array{timestamp: string, track: string, artist: string, album: string, played_ms: int, duration_ms: ?int, uri: string, start_time: bool, isrc: ?string}>
      */
     private function spotify($file): Generator
     {
@@ -43,13 +43,15 @@ class StreamingHistoryReader
             $artist = $this->text($row['master_metadata_album_artist_name'] ?? '');
             $album = $this->text($row['master_metadata_album_album_name'] ?? '');
             $uri = $this->text($row['spotify_track_uri'] ?? '');
+            $rawIsrc = $row['isrc'] ?? ($row['external_ids']['isrc'] ?? null);
+            $isrc = $this->optionalIsrc($rawIsrc);
             $played = $this->milliseconds($row['ms_played']);
             $timestamp = $this->timestamp($row['ts']);
             if ($track === '') {
                 $this->invalid('A Spotify entry has an empty track name.');
             }
             if ($played > 0) {
-                yield ['timestamp' => $timestamp, 'track' => $track, 'artist' => $artist, 'album' => $album, 'played_ms' => $played, 'duration_ms' => null, 'uri' => $uri, 'start_time' => false];
+                yield ['timestamp' => $timestamp, 'track' => $track, 'artist' => $artist, 'album' => $album, 'played_ms' => $played, 'duration_ms' => null, 'uri' => $uri, 'start_time' => false, 'isrc' => $isrc];
             }
         }
     }
@@ -130,7 +132,7 @@ class StreamingHistoryReader
 
     /**
      * @param  resource  $file
-     * @return Generator<int, array{timestamp: string, track: string, artist: string, identity_artist: string, album: string, played_ms: int, duration_ms: ?int, uri: string, start_time: bool, apple_event: array<string, mixed>}>
+     * @return Generator<int, array{timestamp: string, track: string, artist: string, identity_artist: string, album: string, played_ms: int, duration_ms: ?int, uri: string, start_time: bool, isrc: ?string, apple_event: array<string, mixed>}>
      */
     public function apple($file, bool $includeDetails = false): Generator
     {
@@ -203,6 +205,7 @@ class StreamingHistoryReader
                 'duration_ms' => $duration === '' ? null : $this->milliseconds($duration),
                 'uri' => $this->text($row['Event ID'] ?? ''),
                 'start_time' => $start !== '',
+                'isrc' => $this->optionalIsrc($row['ISRC'] ?? null),
                 'apple_event' => $eventDetails,
             ];
         }
@@ -267,6 +270,19 @@ class StreamingHistoryReader
         }
 
         return trim($value);
+    }
+
+    public function optionalIsrc(mixed $value): ?string
+    {
+        if ($value === null || $value === '') {
+            return null;
+        }
+        $isrc = Isrc::normalize($value);
+        if ($isrc === null) {
+            $this->invalid('An ISRC in the import file is invalid.');
+        }
+
+        return $isrc;
     }
 
     private function milliseconds(mixed $value): int

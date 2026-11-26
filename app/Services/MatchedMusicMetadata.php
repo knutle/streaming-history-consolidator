@@ -13,6 +13,9 @@ class MatchedMusicMetadata
     /** @var array<string, ?string> */
     private array $releases = [];
 
+    /** @var array<string, list<string>> */
+    private array $isrcs = [];
+
     public function __construct(private MusicBrainzMatcher $matcher) {}
 
     public function sync(Listen $listen): void
@@ -21,6 +24,16 @@ class MatchedMusicMetadata
             return;
         }
         $metadata = $listen->track_metadata;
+        if (! array_key_exists($listen->recording_mbid, $this->isrcs)) {
+            $this->isrcs[$listen->recording_mbid] = $this->matcher->isrcs($listen->recording_mbid);
+        }
+        $codes = array_values(array_unique([
+            ...($metadata['additional_info']['isrcs'] ?? []), ...$this->isrcs[$listen->recording_mbid],
+        ]));
+        if ($codes !== [] && $codes !== ($metadata['additional_info']['isrcs'] ?? [])) {
+            $metadata['additional_info']['isrcs'] = $codes;
+            $listen->update(['track_metadata' => $metadata]);
+        }
         $values = $metadata['additional_info']['artist_mbids'] ?? [];
         if (! is_array($values) || ! array_is_list($values)) {
             throw new \UnexpectedValueException('Invalid MusicBrainz artist identifiers in listen metadata.');

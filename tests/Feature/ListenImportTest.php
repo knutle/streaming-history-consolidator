@@ -70,6 +70,10 @@ class ListenImportTest extends TestCase
             $table->string('name');
             $table->integer('artist_credit');
         });
+        $schema->create('isrc', function (Blueprint $table) {
+            $table->integer('recording');
+            $table->string('isrc');
+        });
         $schema->create('release', function (Blueprint $table) {
             $table->integer('id')->primary();
             $table->string('gid');
@@ -200,6 +204,7 @@ class ListenImportTest extends TestCase
     {
         $this->musicbrainz();
         DB::connection('musicbrainz')->table('artist_alias')->insert(['artist' => 1, 'name' => 'Älias']);
+        DB::connection('musicbrainz')->table('isrc')->insert(['recording' => 1, 'isrc' => 'USABC2412345']);
         $this->actingAs(User::factory()->create())->post(route('listens.import'), [
             'source' => 'spotify', 'file' => $this->spotify([
                 $this->row('2024-01-01T12:00:00Z', artist: 'aRTIST'),
@@ -212,6 +217,7 @@ class ListenImportTest extends TestCase
         $this->assertSame('äLIAS', $listens[1]->artist_name);
         $this->assertSame('22222222-2222-4222-8222-222222222222', $listens[0]->recording_mbid);
         $this->assertSame($listens[0]->recording_mbid, $listens[1]->recording_mbid);
+        $this->assertSame(['USABC2412345'], $listens[0]->track_metadata['additional_info']['isrcs']);
     }
 
     public function test_ambiguous_artist_aliases_do_not_identify_a_recording(): void
@@ -296,6 +302,10 @@ class ListenImportTest extends TestCase
     public function test_manual_matches_and_existing_matched_listens_store_local_metadata(): void
     {
         $this->musicbrainz();
+        DB::connection('musicbrainz')->table('isrc')->insert([
+            ['recording' => 1, 'isrc' => 'USABC2412345'],
+            ['recording' => 1, 'isrc' => 'GBXYZ2412345'],
+        ]);
         $user = User::factory()->create();
         $this->actingAs($user)->post(route('listens.import'), [
             'source' => 'spotify', 'file' => $this->spotify([$this->row('2024-01-01T12:00:00Z', artist: 'Different artist')]),
@@ -306,6 +316,7 @@ class ListenImportTest extends TestCase
         ])->assertSessionHas('match_result', 1);
         $this->assertSame('Different artist', $listen->fresh()->artist_name);
         $this->assertSame('33333333-3333-4333-8333-333333333333', $listen->fresh()->track_metadata['additional_info']['release_mbid']);
+        $this->assertSame(['GBXYZ2412345', 'USABC2412345'], $listen->fresh()->track_metadata['additional_info']['isrcs']);
         $this->assertDatabaseHas('listen_artists', ['listen_id' => $listen->id]);
         $this->assertDatabaseHas('listen_releases', ['listen_id' => $listen->id]);
         DB::table('listen_artists')->where('listen_id', $listen->id)->delete();

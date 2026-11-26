@@ -279,4 +279,28 @@ class MusicBrainzMatcher
 
         return $releases->count() === 1 ? (string) $releases->first() : null;
     }
+
+    /** @return list<string> */
+    public function isrcs(string $recording): array
+    {
+        if (! config('musicbrainz.enabled')) {
+            return [];
+        }
+        $db = DB::connection('musicbrainz');
+        if (config('musicbrainz.format') === 'canonical' && $db->getDriverName() === 'sqlite') {
+            return [];
+        }
+        $codes = $db->table('isrc')->join('recording', 'recording.id', '=', 'isrc.recording')
+            ->where('recording.gid', $recording)->distinct()->orderBy('isrc.isrc')->pluck('isrc.isrc');
+        $result = [];
+        foreach ($codes as $code) {
+            $isrc = Isrc::normalize($code);
+            if ($isrc === null) {
+                throw new \UnexpectedValueException('Invalid ISRC in the local MusicBrainz database.');
+            }
+            $result[] = $isrc;
+        }
+
+        return array_values(array_unique($result));
+    }
 }

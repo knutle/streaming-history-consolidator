@@ -22,6 +22,7 @@ type Listen = {
             duration_ms?: number;
             artist_mbids?: string[];
             release_mbid?: string;
+            isrcs?: string[];
             apple_music?: {
                 catalog_id?: string;
                 track_artist?: string;
@@ -61,6 +62,12 @@ type Props = {
             artist_name: string;
             release_name: string | null;
             duration_ms: number | null;
+            isrc?: string | null;
+            album_artist?: string;
+            genre?: string;
+            release_date?: string;
+            track_number?: number;
+            disc_number?: number;
             origin: 'import' | 'manual' | 'local';
         }
     >;
@@ -221,6 +228,14 @@ export default function ListenDetails({
                                 </dd>
                             </div>
                         )}
+                        {info.isrcs && info.isrcs.length > 0 && (
+                            <div>
+                                <dt className="text-muted-foreground">
+                                    Recording ISRCs
+                                </dt>
+                                <dd>{info.isrcs.join(', ')}</dd>
+                            </div>
+                        )}
                         <div>
                             <dt className="text-muted-foreground">Source</dt>
                             <dd>
@@ -291,7 +306,8 @@ export default function ListenDetails({
                         unambiguous catalog identifier from your other listens
                         can also be linked through the same MusicBrainz
                         recording. Manual choices are remembered for the same
-                        track, artist, and album.
+                        track, artist, and album. Catalog metadata is saved per
+                        track link; recording ISRCs are listed separately.
                     </p>
                     <div className="mt-3 flex flex-wrap gap-4 text-sm">
                         {(['spotify', 'apple'] as const).map((provider) => {
@@ -330,14 +346,42 @@ export default function ListenDetails({
                                         )}
                                     </div>
                                     {item && (
-                                        <p className="text-muted-foreground">
-                                            {item.track_name} ·{' '}
-                                            {item.artist_name}
-                                            {item.release_name
-                                                ? ` · ${item.release_name}`
-                                                : ''}{' '}
-                                            ({item.origin})
-                                        </p>
+                                        <div className="text-muted-foreground">
+                                            <p>
+                                                {item.track_name} ·{' '}
+                                                {item.artist_name}
+                                                {item.release_name
+                                                    ? ` · ${item.release_name}`
+                                                    : ''}{' '}
+                                                ({item.origin})
+                                            </p>
+                                            {item.isrc && (
+                                                <p>ISRC: {item.isrc}</p>
+                                            )}
+                                            {item.album_artist && (
+                                                <p>
+                                                    Album artist:{' '}
+                                                    {item.album_artist}
+                                                </p>
+                                            )}
+                                            {item.genre && (
+                                                <p>Genre: {item.genre}</p>
+                                            )}
+                                            {item.release_date && (
+                                                <p>
+                                                    Release date:{' '}
+                                                    {item.release_date}
+                                                </p>
+                                            )}
+                                            {item.track_number && (
+                                                <p>
+                                                    Track: {item.track_number}
+                                                </p>
+                                            )}
+                                            {item.disc_number && (
+                                                <p>Disc: {item.disc_number}</p>
+                                            )}
+                                        </div>
                                     )}
                                 </div>
                             );
@@ -455,6 +499,20 @@ export default function ListenDetails({
                                     <InputError
                                         message={errors.catalog_album}
                                     />
+                                </div>
+                                <div className="grid gap-2">
+                                    <Label htmlFor="catalog-isrc">
+                                        Catalog ISRC (optional)
+                                    </Label>
+                                    <Input
+                                        key={inputKey}
+                                        id="catalog-isrc"
+                                        name="catalog_isrc"
+                                        defaultValue={catalogMatch?.isrc ?? ''}
+                                        maxLength={15}
+                                        placeholder="USABC2412345"
+                                    />
+                                    <InputError message={errors.catalog_isrc} />
                                 </div>
                                 <div className="grid gap-2">
                                     <Label htmlFor="catalog-duration">

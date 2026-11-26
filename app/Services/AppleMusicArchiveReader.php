@@ -17,7 +17,7 @@ class AppleMusicArchiveReader
     public function __construct(private StreamingHistoryReader $reader) {}
 
     /**
-     * @return Generator<int, array{timestamp: string, track: string, artist: string, identity_artist: string, album: string, played_ms: int, duration_ms: ?int, uri: string, start_time: bool, apple_music: array<string, mixed>}>
+     * @return Generator<int, array{timestamp: string, track: string, artist: string, identity_artist: string, album: string, played_ms: int, duration_ms: ?int, uri: string, start_time: bool, isrc: ?string, apple_music: array<string, mixed>}>
      */
     public function read(string $path): Generator
     {
@@ -122,6 +122,9 @@ class AppleMusicArchiveReader
                         && abs($entry['duration_ms'] - $candidate['duration_ms']) > 2000) {
                         continue;
                     }
+                    if ($entry['isrc'] !== null && $candidate['isrc'] !== null && $entry['isrc'] !== $candidate['isrc']) {
+                        continue;
+                    }
                     $candidates[hash('sha256', json_encode($candidate, JSON_THROW_ON_ERROR))] = $candidate;
                 }
                 $track = count($candidates) === 1 ? reset($candidates) : null;
@@ -141,6 +144,13 @@ class AppleMusicArchiveReader
                     }
                     if ($track['catalog_id'] !== null) {
                         $extra['catalog_id'] = $track['catalog_id'];
+                    }
+                    if ($track['isrc'] !== null) {
+                        $extra['isrc'] = $track['isrc'];
+                        $entry['isrc'] ??= $track['isrc'];
+                    }
+                    if ($track['duration_ms'] !== null) {
+                        $extra['duration_ms'] = $track['duration_ms'];
                     }
                 }
                 if ($entry['artist'] === '') {
@@ -214,7 +224,7 @@ class AppleMusicArchiveReader
 
     /**
      * @param  resource  $stream
-     * @return array<string, list<array{track_artist: ?string, album_artist: ?string, catalog_id: ?string, duration_ms: ?int, genre: ?string, release_date: ?string, track_number: ?int, disc_number: ?int}>>
+     * @return array<string, list<array{track_artist: ?string, album_artist: ?string, catalog_id: ?string, duration_ms: ?int, genre: ?string, release_date: ?string, track_number: ?int, disc_number: ?int, isrc: ?string}>>
      */
     private function library($stream): array
     {
@@ -241,6 +251,7 @@ class AppleMusicArchiveReader
                 'release_date' => $this->optionalText($row['Release Date'] ?? null),
                 'track_number' => $this->positiveInteger($row['Track Number On Album'] ?? null),
                 'disc_number' => $this->positiveInteger($row['Disc Number Of Album'] ?? null),
+                'isrc' => $this->reader->optionalIsrc($row['ISRC'] ?? null),
             ];
             $index[$this->key($title, $album)][] = $candidate;
         }

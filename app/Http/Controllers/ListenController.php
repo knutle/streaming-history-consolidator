@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Http\Requests\ImportListensRequest;
 use App\Models\Listen;
 use App\Services\CatalogMatcher;
+use App\Services\Isrc;
 use App\Services\ManualListenMatcher;
 use App\Services\MusicBrainzMatcher;
 use App\Services\StreamingHistoryImporter;
@@ -136,13 +137,19 @@ class ListenController extends Controller
             'catalog_artist' => ['required', 'string', 'max:255'],
             'catalog_album' => ['nullable', 'string', 'max:255'],
             'catalog_duration' => ['nullable', 'integer', 'min:1', 'max:86400000'],
+            'catalog_isrc' => ['nullable', 'string', function (string $attribute, mixed $value, \Closure $fail) {
+                if (Isrc::normalize($value) === null) {
+                    $fail('Enter a valid 12-character ISRC.');
+                }
+            }],
         ]);
         $id = $matcher->identifier($values['provider'], $values['catalog_url']);
         if ($id === null) {
             throw ValidationException::withMessages(['catalog_url' => 'Enter a valid track link for the selected catalog.']);
         }
         $match = $matcher->match($values['provider'], $id, $values['catalog_track'], $values['catalog_artist'],
-            $values['catalog_album'] ?? null, isset($values['catalog_duration']) ? (int) $values['catalog_duration'] : null, 'manual');
+            $values['catalog_album'] ?? null, isset($values['catalog_duration']) ? (int) $values['catalog_duration'] : null, 'manual',
+            isset($values['catalog_isrc']) ? Isrc::normalize($values['catalog_isrc']) : null);
         $count = $matcher->remember($request->user(), $item, $match);
 
         return to_route('listens.show', $item->id)->with('catalog_result', $count);

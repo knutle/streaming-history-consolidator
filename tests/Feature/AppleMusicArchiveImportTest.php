@@ -6,6 +6,8 @@ use App\Models\Listen;
 use App\Models\User;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
+use Illuminate\Support\Facades\DB;
+use Inertia\Testing\AssertableInertia as Assert;
 use Tests\TestCase;
 use ZipArchive;
 
@@ -106,6 +108,7 @@ class AppleMusicArchiveImportTest extends TestCase
             'release_date' => '2020-01-01T00:00:00Z',
             'track_number' => 3,
             'disc_number' => 1,
+            'duration_ms' => 180000,
         ], $listen->track_metadata['additional_info']['apple_music']);
         $this->assertStringNotContainsString('private-ip', json_encode($listen->track_metadata, JSON_THROW_ON_ERROR));
 
@@ -125,6 +128,48 @@ class AppleMusicArchiveImportTest extends TestCase
         $this->assertSame('Singer', $listen->artist_name);
         $this->assertSame('123456', $listen->track_metadata['additional_info']['apple_music']['catalog_id']);
         $this->assertArrayNotHasKey('genre', $listen->track_metadata['additional_info']['apple_music']);
+    }
+
+    public function test_library_metadata_and_isrc_are_stored_only_for_the_matching_catalog_identifier(): void
+    {
+        $this->actingAs(User::factory()->create())->post(route('listens.import'), [
+            'source' => 'apple_zip', 'file' => $this->export($this->dailyCsv(), $this->library(['ISRC' => 'US-ABC-24-12345'])),
+        ])->assertSessionHasNoErrors();
+        $listen = Listen::query()->sole();
+        $this->get(route('listens.show', $listen->id))->assertInertia(fn (Assert $page) => $page
+            ->where('catalogs.apple.id', '123456')->where('catalogs.apple.genre', 'Rock')
+            ->where('catalogs.apple.isrc', 'USABC2412345')
+            ->where('listen.track_metadata.additional_info.isrcs.0', 'USABC2412345'));
+        $this->post(route('listens.catalog', $listen->id), [
+            'provider' => 'apple', 'catalog_url' => 'https://music.apple.com/us/song/987',
+            'catalog_track' => 'Different track', 'catalog_artist' => 'Different artist',
+        ])->assertSessionHasNoErrors();
+        DB::table('catalog_track_metadata')->delete();
+        $this->artisan('catalogs:sync-metadata')->assertSuccessful();
+        $this->assertDatabaseHas('catalog_track_metadata', ['provider' => 'apple', 'catalog_id' => '123456']);
+        $this->get(route('listens.show', $listen->id))->assertInertia(fn (Assert $page) => $page
+            ->where('catalogs.apple.id', '987')->where('catalogs.apple.isrc', null)
+            ->missing('catalogs.apple.genre'));
+    }
+
+    public function test_conflicting_library_isrc_does_not_enrich_the_catalog_match(): void
+    {
+        $play = str_replace(
+            ['Client IP Address', 'private-ip'],
+            ['ISRC,Client IP Address', 'GBXYZ2412345,private-ip'],
+            $this->playCsv(),
+        );
+        $zip = $this->zip([
+            'Apple Music Play Activity.csv' => $play,
+            'Apple Music - Play History Daily Tracks.csv' => $this->dailyCsv(),
+            'Apple Music Library Tracks.json' => $this->library(['ISRC' => 'USABC2412345']),
+        ]);
+        $this->actingAs(User::factory()->create())->post(route('listens.import'), [
+            'source' => 'apple_zip', 'file' => UploadedFile::fake()->createWithContent('export.zip', $zip),
+        ])->assertSessionHasNoErrors();
+        $listen = Listen::query()->sole();
+        $this->get(route('listens.show', $listen->id))->assertInertia(fn (Assert $page) => $page
+            ->where('catalogs.apple.isrc', 'GBXYZ2412345')->missing('catalogs.apple.genre'));
     }
 
     public function test_ambiguous_daily_and_library_metadata_do_not_guess_an_artist(): void

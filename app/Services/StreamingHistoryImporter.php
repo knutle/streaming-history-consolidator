@@ -53,7 +53,7 @@ class StreamingHistoryImporter
                     }
                     if ($existing->track_name === $entry['track'] && ($existing->release_name ?? '') === $entry['album']) {
                         $catalogs = $this->catalogMatcher->imported($user, $source, $entry['uri'], $appleMusic ?? [],
-                            $entry['track'], $existing->artist_name, $entry['album'], $entry['duration_ms']);
+                            $entry['track'], $existing->artist_name, $entry['album'], $entry['duration_ms'], $entry['isrc'] ?? null);
                         if ($catalogs !== []) {
                             $metadata = $existing->track_metadata;
                             $metadata['additional_info']['catalogs'] = $this->catalogMatcher->forListen($existing) + $catalogs;
@@ -87,6 +87,9 @@ class StreamingHistoryImporter
                 }
 
                 $additionalInfo = ['music_service' => $source === 'spotify' ? 'spotify.com' : 'music.apple.com'];
+                if (($entry['isrc'] ?? null) !== null) {
+                    $additionalInfo['isrcs'] = [$entry['isrc']];
+                }
                 if ($entry['duration_ms'] !== null && $entry['duration_ms'] > 0) {
                     $additionalInfo['duration_ms'] = $entry['duration_ms'];
                 }
@@ -94,7 +97,7 @@ class StreamingHistoryImporter
                     $additionalInfo['apple_music'] = $appleMusic;
                 }
                 $catalogs = $this->catalogMatcher->imported($user, $source, $entry['uri'], $appleMusic ?? [],
-                    $entry['track'], $artist, $entry['album'], $entry['duration_ms']);
+                    $entry['track'], $artist, $entry['album'], $entry['duration_ms'], $entry['isrc'] ?? null);
                 if ($catalogs !== []) {
                     $additionalInfo['catalogs'] = $catalogs;
                 }
@@ -148,7 +151,7 @@ class StreamingHistoryImporter
     }
 
     /**
-     * @return Generator<int, array{timestamp: string, track: string, artist: string, identity_artist?: string, album: string, played_ms: int, duration_ms: ?int, uri: string, start_time: bool, apple_music?: array<string, mixed>}>
+     * @return Generator<int, array{timestamp: string, track: string, artist: string, identity_artist?: string, album: string, played_ms: int, duration_ms: ?int, uri: string, start_time: bool, isrc: ?string, apple_music?: array<string, mixed>}>
      */
     private function entries(string $path, string $source, bool $archive): Generator
     {
@@ -160,13 +163,18 @@ class StreamingHistoryImporter
     }
 
     /**
-     * @param  array{track: string, artist: string, album: string}  $entry
+     * @param  array{track: string, artist: string, album: string, isrc: ?string}  $entry
      * @param  array<string, mixed>|null  $appleMusic
      * @param  array<string, mixed>  $matches
      */
     private function enrichExisting(Listen $listen, array $entry, ?array $appleMusic, User $user, array &$matches): void
     {
         $metadata = $listen->track_metadata;
+        if (($entry['isrc'] ?? null) !== null) {
+            $metadata['additional_info']['isrcs'] = array_values(array_unique([
+                ...($metadata['additional_info']['isrcs'] ?? []), $entry['isrc'],
+            ]));
+        }
         if ($appleMusic !== null) {
             $existing = $metadata['additional_info']['apple_music'] ?? [];
             if (! is_array($existing)) {
