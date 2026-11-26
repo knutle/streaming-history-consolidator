@@ -9,6 +9,7 @@ use App\Services\Isrc;
 use App\Services\ManualListenMatcher;
 use App\Services\MusicBrainzMatcher;
 use App\Services\StreamingHistoryImporter;
+use App\Services\StreamingHistoryUpload;
 use Carbon\CarbonImmutable;
 use Illuminate\Contracts\Auth\MustVerifyEmail;
 use Illuminate\Http\RedirectResponse;
@@ -87,9 +88,25 @@ class ListenController extends Controller
         ]);
     }
 
-    public function store(ImportListensRequest $request, StreamingHistoryImporter $importer): RedirectResponse
+    public function store(ImportListensRequest $request, StreamingHistoryImporter $importer, StreamingHistoryUpload $upload): RedirectResponse
     {
-        $result = $importer->import($request->user(), $request->validated('source'), $request->file('file')->getRealPath());
+        $executionLimit = ini_get('max_execution_time');
+        if ((int) $executionLimit > 0 && (int) $executionLimit < 7200
+            && (! function_exists('set_time_limit') || ! set_time_limit(7200))) {
+            throw ValidationException::withMessages([
+                $request->hasFile('files') ? 'files' : 'file' => 'The PHP execution time limit could not be extended for this import. Check the server configuration.',
+            ]);
+        }
+
+        if ($request->hasFile('files')) {
+            $files = $request->file('files');
+            if (! is_array($files)) {
+                throw new \LogicException('Validated import files must be an array.');
+            }
+            $result = $upload->import($request->user(), array_values($files));
+        } else {
+            $result = $importer->import($request->user(), $request->validated('source'), $request->file('file')->getRealPath());
+        }
 
         return to_route('listens.create')->with('import_result', $result);
     }

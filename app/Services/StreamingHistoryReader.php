@@ -10,7 +10,7 @@ use JsonException;
 class StreamingHistoryReader
 {
     /**
-     * @return Generator<int, array{timestamp: string, track: string, artist: string, identity_artist?: string, album: string, played_ms: int, duration_ms: ?int, uri: string, start_time: bool, isrc: ?string}>
+     * @return Generator<int, array{timestamp: string, track: string, artist: string, identity_artist?: string, album: string, played_ms: int, duration_ms: ?int, uri: string, start_time: bool, isrc: ?string, spotify?: array<string, string|bool>}>
      */
     public function read(string $path, string $source): Generator
     {
@@ -28,7 +28,7 @@ class StreamingHistoryReader
 
     /**
      * @param  resource  $file
-     * @return Generator<int, array{timestamp: string, track: string, artist: string, album: string, played_ms: int, duration_ms: ?int, uri: string, start_time: bool, isrc: ?string}>
+     * @return Generator<int, array{timestamp: string, track: string, artist: string, album: string, played_ms: int, duration_ms: ?int, uri: string, start_time: bool, isrc: ?string, spotify: array<string, string|bool>}>
      */
     private function spotify($file): Generator
     {
@@ -51,7 +51,21 @@ class StreamingHistoryReader
                 $this->invalid('A Spotify entry has an empty track name.');
             }
             if ($played > 0) {
-                yield ['timestamp' => $timestamp, 'track' => $track, 'artist' => $artist, 'album' => $album, 'played_ms' => $played, 'duration_ms' => null, 'uri' => $uri, 'start_time' => false, 'isrc' => $isrc];
+                $details = [];
+                foreach (['reason_start', 'reason_end'] as $field) {
+                    if (($row[$field] ?? null) !== null) {
+                        $details[$field] = $this->text($row[$field]);
+                    }
+                }
+                foreach (['shuffle', 'skipped', 'offline'] as $field) {
+                    if (($row[$field] ?? null) !== null) {
+                        if (! is_bool($row[$field])) {
+                            $this->invalid('A Spotify playback flag is invalid.');
+                        }
+                        $details[$field] = $row[$field];
+                    }
+                }
+                yield ['timestamp' => $timestamp, 'track' => $track, 'artist' => $artist, 'album' => $album, 'played_ms' => $played, 'duration_ms' => null, 'uri' => $uri, 'start_time' => false, 'isrc' => $isrc, 'spotify' => $details];
             }
         }
     }

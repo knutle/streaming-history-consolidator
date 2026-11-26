@@ -21,19 +21,34 @@ class StreamingHistoryImporter
         private MatchedMusicMetadata $matchedMetadata,
     ) {}
 
-    /** @return array{imported: int, duplicates: int, matched: int} */
-    public function import(User $user, string $source, string $path): array
+    /**
+     * @param  array<string, string|null>  $spotifyMetadata
+     * @param  array<string, array<string, bool>>  $spotifyPresence
+     * @return array{imported: int, duplicates: int, matched: int}
+     */
+    public function import(User $user, string $source, string $path, array $spotifyMetadata = [], array $spotifyPresence = []): array
     {
         $archive = $source === 'apple_zip';
         $source = $archive ? 'apple' : $source;
 
-        return DB::transaction(function () use ($user, $source, $path, $archive) {
+        return DB::transaction(function () use ($user, $source, $path, $archive, $spotifyMetadata, $spotifyPresence) {
             DB::table('users')->where('id', $user->id)->lockForUpdate()->first();
             $counts = ['imported' => 0, 'duplicates' => 0, 'matched' => 0];
             $matches = [];
 
             $entries = $this->entries($path, $source, $archive);
             foreach ($entries as $entry) {
+                if ($source === 'spotify' && $entry['uri'] === '') {
+                    $key = StreamingHistoryUpload::spotifyKey($entry['track'], $entry['artist'], $entry['album']);
+                    $entry['identity_uri'] = $entry['uri'];
+                    $entry['uri'] = $spotifyMetadata[$key] ?? '';
+                }
+                if ($source === 'spotify' && $entry['uri'] !== '') {
+                    $id = $this->catalogMatcher->identifier('spotify', $entry['uri']);
+                    if ($id !== null && isset($spotifyPresence[$id])) {
+                        $entry['spotify'] = ($entry['spotify'] ?? []) + $spotifyPresence[$id];
+                    }
+                }
                 $appleMusic = $entry['apple_music'] ?? null;
                 if ($archive && $appleMusic === null) {
                     throw new \LogicException('The Apple archive reader returned an invalid entry.');
@@ -42,7 +57,7 @@ class StreamingHistoryImporter
                     ? ['event_id', $entry['uri']]
                     : [
                         $entry['timestamp'], $entry['played_ms'], $entry['start_time'],
-                        $entry['uri'] !== '' ? $entry['uri'] : [$entry['track'], $entry['identity_artist'] ?? $entry['artist'], $entry['album']],
+                        ($entry['identity_uri'] ?? $entry['uri']) !== '' ? ($entry['identity_uri'] ?? $entry['uri']) : [$entry['track'], $entry['identity_artist'] ?? $entry['artist'], $entry['album']],
                     ];
                 $fingerprint = hash('sha256', json_encode($identityValues, JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE));
                 $identity = ['user_id' => $user->id, 'source' => $source, 'fingerprint' => $fingerprint];
@@ -95,6 +110,9 @@ class StreamingHistoryImporter
                 }
                 if ($archive && $appleMusic !== []) {
                     $additionalInfo['apple_music'] = $appleMusic;
+                }
+                if (($entry['spotify'] ?? []) !== []) {
+                    $additionalInfo['spotify'] = $entry['spotify'];
                 }
                 $catalogs = $this->catalogMatcher->imported($user, $source, $entry['uri'], $appleMusic ?? [],
                     $entry['track'], $artist, $entry['album'], $entry['duration_ms'], $entry['isrc'] ?? null);
@@ -151,7 +169,7 @@ class StreamingHistoryImporter
     }
 
     /**
-     * @return Generator<int, array{timestamp: string, track: string, artist: string, identity_artist?: string, album: string, played_ms: int, duration_ms: ?int, uri: string, start_time: bool, isrc: ?string, apple_music?: array<string, mixed>}>
+     * @return Generator<int, array{timestamp: string, track: string, artist: string, identity_artist?: string, album: string, played_ms: int, duration_ms: ?int, uri: string, start_time: bool, isrc: ?string, apple_music?: array<string, mixed>, spotify?: array<string, string|bool>}>
      */
     private function entries(string $path, string $source, bool $archive): Generator
     {
@@ -163,7 +181,7 @@ class StreamingHistoryImporter
     }
 
     /**
-     * @param  array{track: string, artist: string, album: string, isrc: ?string}  $entry
+     * @param  array{track: string, artist: string, album: string, isrc: ?string, spotify?: array<string, string|bool>}  $entry
      * @param  array<string, mixed>|null  $appleMusic
      * @param  array<string, mixed>  $matches
      */
@@ -181,6 +199,13 @@ class StreamingHistoryImporter
                 throw ValidationException::withMessages(['file' => 'An existing listen has invalid Apple Music metadata.']);
             }
             $metadata['additional_info']['apple_music'] = $existing + $appleMusic;
+        }
+        if (($entry['spotify'] ?? []) !== []) {
+            $existing = $metadata['additional_info']['spotify'] ?? [];
+            if (! is_array($existing)) {
+                throw ValidationException::withMessages(['file' => 'An existing listen has invalid Spotify metadata.']);
+            }
+            $metadata['additional_info']['spotify'] = $existing + $entry['spotify'];
         }
         $artist = $listen->artist_name;
         if ($artist === 'Unknown artist' && $entry['artist'] !== '' && $listen->recording_mbid === null) {

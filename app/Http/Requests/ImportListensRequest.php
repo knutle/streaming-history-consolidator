@@ -23,8 +23,10 @@ class ImportListensRequest extends FormRequest
     public function rules(): array
     {
         return [
-            'source' => ['required', 'in:spotify,apple,apple_zip'],
-            'file' => ['required', 'file', 'max:1048576'],
+            'source' => ['required_without:files', 'in:spotify,apple,apple_zip'],
+            'file' => ['required_without:files', 'file', 'max:1048576'],
+            'files' => ['required_without:file', 'array', 'min:1', 'max:20'],
+            'files.*' => ['required', 'file', 'max:1048576'],
         ];
     }
 }

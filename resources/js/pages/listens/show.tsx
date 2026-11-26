@@ -23,6 +23,15 @@ type Listen = {
             artist_mbids?: string[];
             release_mbid?: string;
             isrcs?: string[];
+            spotify?: {
+                reason_start?: string;
+                reason_end?: string;
+                shuffle?: boolean;
+                skipped?: boolean;
+                offline?: boolean;
+                saved_in_library_export?: boolean;
+                in_playlist_export?: boolean;
+            };
             apple_music?: {
                 catalog_id?: string;
                 track_artist?: string;
@@ -131,6 +140,22 @@ export default function ListenDetails({
         { label: 'Repeat', value: apple?.repeat },
         { label: 'Start position (ms)', value: apple?.start_position_ms },
         { label: 'End position (ms)', value: apple?.end_position_ms },
+    ].filter(({ value }) => value != null && value !== '');
+    const spotify = info.spotify;
+    const spotifyDetails = [
+        { label: 'Start reason', value: spotify?.reason_start },
+        { label: 'End reason', value: spotify?.reason_end },
+        { label: 'Shuffle', value: spotify?.shuffle },
+        { label: 'Skipped', value: spotify?.skipped },
+        { label: 'Offline', value: spotify?.offline },
+        {
+            label: 'Saved in Spotify library export',
+            value: spotify?.saved_in_library_export,
+        },
+        {
+            label: 'In a Spotify playlist export',
+            value: spotify?.in_playlist_export,
+        },
     ].filter(({ value }) => value != null && value !== '');
     const musicSearch = encodeURIComponent(
         `${listen.track_name} ${listen.artist_name}`,
@@ -260,6 +285,20 @@ export default function ListenDetails({
                                     {label}
                                 </dt>
                                 <dd>{value}</dd>
+                            </div>
+                        ))}
+                        {spotifyDetails.map(({ label, value }) => (
+                            <div key={label}>
+                                <dt className="text-muted-foreground">
+                                    {label}
+                                </dt>
+                                <dd>
+                                    {typeof value === 'boolean'
+                                        ? value
+                                            ? 'Yes'
+                                            : 'No'
+                                        : value}
+                                </dd>
                             </div>
                         ))}
                     </dl>
