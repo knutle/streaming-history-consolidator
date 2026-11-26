@@ -10,6 +10,7 @@ use App\Services\ManualListenMatcher;
 use App\Services\MusicBrainzMatcher;
 use App\Services\StreamingHistoryImporter;
 use Carbon\CarbonImmutable;
+use Illuminate\Contracts\Auth\MustVerifyEmail;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -20,6 +21,15 @@ use Inertia\Response;
 
 class ListenController extends Controller
 {
+    public function create(Request $request): Response
+    {
+        return Inertia::render('settings/import-history', [
+            'musicbrainzEnabled' => (bool) config('musicbrainz.enabled'),
+            'importResult' => $request->session()->get('import_result'),
+            'canImport' => ! ($request->user() instanceof MustVerifyEmail) || $request->user()->hasVerifiedEmail(),
+        ]);
+    }
+
     public function index(Request $request): Response
     {
         $filters = $request->validate([
@@ -81,7 +91,7 @@ class ListenController extends Controller
     {
         $result = $importer->import($request->user(), $request->validated('source'), $request->file('file')->getRealPath());
 
-        return to_route('profile.edit')->with('import_result', $result);
+        return to_route('listens.create')->with('import_result', $result);
     }
 
     public function show(Request $request, int $listen, MusicBrainzMatcher $matcher, CatalogMatcher $catalogMatcher): Response
@@ -181,6 +191,6 @@ class ListenController extends Controller
             DB::table('import_batches')->where('user_id', $request->user()->id)->delete();
         });
 
-        return to_route('profile.edit');
+        return to_route('listens.create');
     }
 }

@@ -11,6 +11,7 @@ Route::middleware(['auth'])->group(function () {
 
     Route::get('settings/profile', [ProfileController::class, 'edit'])->name('profile.edit');
     Route::patch('settings/profile', [ProfileController::class, 'update'])->name('profile.update');
+    Route::get('settings/import-history', [ListenController::class, 'create'])->name('listens.create');
     Route::delete('settings/listening-history', [ListenController::class, 'destroy'])->name('listens.destroy');
 });
 

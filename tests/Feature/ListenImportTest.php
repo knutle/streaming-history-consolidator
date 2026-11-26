@@ -100,6 +100,7 @@ class ListenImportTest extends TestCase
     public function test_guests_cannot_import_or_browse(): void
     {
         $this->get(route('listens.index'))->assertRedirect(route('login'));
+        $this->get(route('listens.create'))->assertRedirect(route('login'));
         $this->post(route('listens.import'))->assertRedirect(route('login'));
         $this->delete(route('listens.destroy'))->assertRedirect(route('login'));
         $this->get(route('listens.show', 1))->assertRedirect(route('login'));
@@ -126,7 +127,7 @@ class ListenImportTest extends TestCase
         $this->assertSame(2, Listen::query()->where('user_id', $user->id)->count());
 
         $this->actingAs($user)->delete(route('listens.destroy'), ['user_id' => $other->id])
-            ->assertSessionHasNoErrors()->assertRedirect(route('profile.edit'));
+            ->assertSessionHasNoErrors()->assertRedirect(route('listens.create'));
 
         $this->assertDatabaseMissing('listens', ['user_id' => $user->id]);
         $this->assertModelExists($otherListen);
@@ -144,18 +145,30 @@ class ListenImportTest extends TestCase
         ])->assertSessionHas('import_result', ['imported' => 1, 'duplicates' => 0, 'matched' => 0]);
         $user->forceFill(['email_verified_at' => null])->save();
 
-        $this->delete(route('listens.destroy'))->assertRedirect(route('profile.edit'));
+        $this->delete(route('listens.destroy'))->assertRedirect(route('listens.create'));
 
         $this->assertDatabaseMissing('listens', ['user_id' => $user->id]);
     }
 
-    public function test_import_validation_errors_return_to_profile_settings(): void
+    public function test_import_validation_errors_return_to_import_page(): void
     {
         $this->actingAs(User::factory()->create())
-            ->from(route('profile.edit'))
+            ->from(route('listens.create'))
             ->post(route('listens.import'), ['source' => 'spotify'])
-            ->assertRedirect(route('profile.edit'))
+            ->assertRedirect(route('listens.create'))
             ->assertSessionHasErrors('file');
+    }
+
+    public function test_unverified_users_can_view_the_import_page_but_cannot_import(): void
+    {
+        $user = User::factory()->unverified()->create();
+
+        $this->actingAs($user)->get(route('listens.create'))->assertOk()
+            ->assertInertia(fn (Assert $page) => $page->component('settings/import-history')->where('canImport', false));
+        $this->post(route('listens.import'), [
+            'source' => 'spotify', 'file' => $this->spotify([$this->row('2024-01-01T12:00:00Z')]),
+        ])->assertRedirect(route('verification.notice'));
+        $this->assertDatabaseCount('listens', 0);
     }
 
     public function test_manual_matching_updates_only_own_unmatched_listens_and_is_remembered_for_future_imports(): void
@@ -193,7 +206,7 @@ class ListenImportTest extends TestCase
         $this->actingAs($other)->post(route('listens.import'), [
             'source' => 'spotify', 'file' => $this->spotify([$this->row('2024-01-03T12:00:00Z', album: 'Third album')]),
         ])->assertSessionHas('import_result', ['imported' => 1, 'duplicates' => 0, 'matched' => 0]);
-        $this->actingAs($user)->delete(route('listens.destroy'))->assertRedirect(route('profile.edit'));
+        $this->actingAs($user)->delete(route('listens.destroy'))->assertRedirect(route('listens.create'));
         $this->assertDatabaseMissing('import_batches', ['user_id' => $user->id]);
         $this->post(route('listens.import'), [
             'source' => 'spotify', 'file' => $this->spotify([$first]),
@@ -412,11 +425,12 @@ class ListenImportTest extends TestCase
         $podcast = ['ts' => '2024-01-01T12:01:00Z', 'ms_played' => 60000, 'master_metadata_track_name' => null];
         $this->actingAs($user)->post(route('listens.import'), [
             'source' => 'spotify', 'file' => $this->spotify([$row, $row, $podcast]),
-        ])->assertRedirect(route('profile.edit'))->assertSessionHas('import_result', ['imported' => 1, 'duplicates' => 1, 'matched' => 1]);
+        ])->assertRedirect(route('listens.create'))->assertSessionHas('import_result', ['imported' => 1, 'duplicates' => 1, 'matched' => 1]);
 
-        $this->get(route('profile.edit'))->assertOk()->assertInertia(fn (Assert $page) => $page
-            ->component('settings/profile')
+        $this->get(route('listens.create'))->assertOk()->assertInertia(fn (Assert $page) => $page
+            ->component('settings/import-history')
             ->where('musicbrainzEnabled', true)
+            ->where('canImport', true)
             ->where('importResult', ['imported' => 1, 'duplicates' => 1, 'matched' => 1]));
 
         $listen = Listen::query()->sole();

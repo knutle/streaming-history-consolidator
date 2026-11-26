@@ -86,7 +86,7 @@ class CatalogMatchingTest extends TestCase
         $this->assertArrayNotHasKey('apple', Listen::query()->where('user_id', $other->id)->sole()->track_metadata['additional_info']['catalogs']);
         $this->import('2024-01-04T12:00:00Z');
         $this->assertSame('987', Listen::query()->where('user_id', $user->id)->latest('id')->firstOrFail()->track_metadata['additional_info']['catalogs']['apple']['id']);
-        $this->delete(route('listens.destroy'))->assertRedirect(route('profile.edit'));
+        $this->delete(route('listens.destroy'))->assertRedirect(route('listens.create'));
         $this->import('2024-01-05T12:00:00Z');
         $this->assertSame('987', Listen::query()->where('user_id', $user->id)->sole()->track_metadata['additional_info']['catalogs']['apple']['id']);
     }
