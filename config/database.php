@@ -3,6 +3,16 @@
 use Illuminate\Support\Str;
 use Pdo\Mysql;
 
+$musicBrainzPath = env('MUSICBRAINZ_SETUP_PATH', storage_path('app/private/musicbrainz')).'/connection.json';
+$musicBrainzContents = is_file($musicBrainzPath) ? file_get_contents($musicBrainzPath) : null;
+if ($musicBrainzContents === false) {
+    throw new RuntimeException('Unable to read the local MusicBrainz connection.');
+}
+$localMusicBrainz = $musicBrainzContents !== null ? json_decode($musicBrainzContents, true, 512, JSON_THROW_ON_ERROR) : [];
+$musicBrainzExternal = collect(['HOST', 'PORT', 'DATABASE', 'USERNAME', 'PASSWORD', 'SCHEMA', 'SSLMODE'])
+    ->contains(fn ($key) => env('MUSICBRAINZ_DB_'.$key) !== null);
+$canonicalMusicBrainz = ($localMusicBrainz['format'] ?? null) === 'canonical' && ! $musicBrainzExternal;
+
 return [
 
     /*
@@ -31,6 +41,25 @@ return [
     */
 
     'connections' => [
+
+        'musicbrainz' => $canonicalMusicBrainz ? [
+            'driver' => 'sqlite',
+            'database' => $localMusicBrainz['database'],
+            'prefix' => '',
+            'foreign_key_constraints' => false,
+        ] : [
+            'driver' => 'pgsql',
+            'host' => env('MUSICBRAINZ_DB_HOST', $localMusicBrainz['host'] ?? '127.0.0.1'),
+            'port' => env('MUSICBRAINZ_DB_PORT', $localMusicBrainz['port'] ?? '5432'),
+            'database' => env('MUSICBRAINZ_DB_DATABASE', ($localMusicBrainz['format'] ?? null) === 'canonical' ? 'musicbrainz_db' : ($localMusicBrainz['database'] ?? 'musicbrainz_db')),
+            'username' => env('MUSICBRAINZ_DB_USERNAME', $localMusicBrainz['username'] ?? 'musicbrainz'),
+            'password' => env('MUSICBRAINZ_DB_PASSWORD', $localMusicBrainz['password'] ?? ''),
+            'charset' => 'utf8',
+            'prefix' => '',
+            'prefix_indexes' => true,
+            'search_path' => env('MUSICBRAINZ_DB_SCHEMA', 'musicbrainz'),
+            'sslmode' => env('MUSICBRAINZ_DB_SSLMODE', 'prefer'),
+        ],
 
         'sqlite' => [
             'driver' => 'sqlite',
