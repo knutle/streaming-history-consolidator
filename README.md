@@ -75,3 +75,15 @@ php artisan musicbrainz:setup --download-canonical
 ```
 
 The catalog download and indexing require substantial disk space and time. See `php artisan musicbrainz:setup --help` for the full mirror option, importing an existing canonical CSV, and storage requirements. Spotify API credentials are optional and are only used when manually requesting Spotify catalog metadata.
+
+### Optional album artwork
+
+Listen and artist/album details use compact, themed summaries with expandable playback metadata. Album covers are optional: set `ALBUM_ARTWORK_ENABLED=true` to enable them app-wide (disabled by default).
+
+When enabled, opening an album or listen detail page can send an existing, unambiguous release ID to [Cover Art Archive](https://musicbrainz.org/doc/Cover_Art_Archive/API). Covers load separately from the page, are downloaded through Cover Art Archive/Internet Archive, and are cached privately under `storage/app/private/album-artwork`. The browser receives images from this application, not from a third-party image host. A missing or ambiguous release keeps a placeholder; artist pages do not fetch artist photos.
+
+“Find or change album artwork” searches MusicBrainz only when you submit the search form. This sends your entered album search text externally. Selecting a release saves an artwork-only choice for your account's exact imported artist/album group; it does not change recording matches, album associations, catalog links, or individual plays. Resetting the choice returns to known-release artwork.
+
+Successful covers are refreshed on access after 30 days; missing covers are cached for 24 hours. Temporary errors use a short backoff (at least five minutes, respecting provider cooldowns up to 24 hours), remain visible as errors rather than “no cover”, and retain a previously cached image when possible. Files are replaced on refresh; the cache directory needs writable, persistent storage, shared between web instances when running more than one. Use the application's shared cache store for locks and status metadata. No extra queue worker is required.
+
+After updating an existing installation, run `./vendor/bin/sail artisan migrate` and `npm run build`. If configuration is cached, rebuild it after changing the flag with `./vendor/bin/sail artisan config:cache`. Disabling the flag stops artwork lookups, search/selection, and cached-image serving without deleting saved choices or files.

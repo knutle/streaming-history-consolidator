@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Jobs\ScanArtistRecordings;
 use App\Models\Listen;
+use App\Services\AlbumArtwork;
 use App\Services\CatalogMatcher;
 use App\Services\CatalogRecordingGroups;
 use App\Services\ManualMusicEntityMatcher;
@@ -63,7 +64,7 @@ class MusicEntityController extends Controller
         return Inertia::render('music-entities/index', ['type' => $type, 'entities' => $entities, 'filters' => $values]);
     }
 
-    public function manage(Request $request, string $type, int $listen, ManualMusicEntityMatcher $manual, MusicBrainzMatcher $matcher, CatalogMatcher $catalogMatcher, CatalogRecordingGroups $groups, MusicBrainzApi $api): Response
+    public function manage(Request $request, string $type, int $listen, ManualMusicEntityMatcher $manual, MusicBrainzMatcher $matcher, CatalogMatcher $catalogMatcher, CatalogRecordingGroups $groups, MusicBrainzApi $api, AlbumArtwork $artwork): Response
     {
         $item = $this->item($request, $type, $listen);
         $values = $request->validate([
@@ -96,6 +97,9 @@ class MusicEntityController extends Controller
             ->paginate(25, ['listens.*'], 'listen_page')->withQueryString();
 
         return Inertia::render('music-entities/manage', [
+            'artworkEnabled' => (bool) config('artwork.enabled'),
+            'artwork' => config('artwork.enabled') && $type === 'album' ? Inertia::defer(fn () => $artwork->forGroup($item), 'artwork') : null,
+            'artworkResult' => $request->session()->get('artwork_result'),
             'type' => $type,
             'item' => ['listen_id' => $item->id, 'artist_name' => $item->artist_name, 'release_name' => $item->release_name],
             'canMatch' => $item->artist_name !== 'Unknown artist' && trim($item->artist_name) !== ''
@@ -186,9 +190,9 @@ class MusicEntityController extends Controller
         return $item;
     }
 
-    public function artist(Request $request, string $mbid): Response
+    public function artist(Request $request, string $mbid, AlbumArtwork $artwork): Response
     {
-        return $this->show($request, $mbid, 'artist');
+        return $this->show($request, $mbid, 'artist', $artwork);
     }
 
     public function lookupArtistName(Request $request, string $mbid, MusicBrainzApi $api): RedirectResponse
@@ -207,12 +211,12 @@ class MusicEntityController extends Controller
         return to_route('artists.show', $mbid);
     }
 
-    public function album(Request $request, string $mbid): Response
+    public function album(Request $request, string $mbid, AlbumArtwork $artwork): Response
     {
-        return $this->show($request, $mbid, 'album');
+        return $this->show($request, $mbid, 'album', $artwork);
     }
 
-    private function show(Request $request, string $mbid, string $type): Response
+    private function show(Request $request, string $mbid, string $type, AlbumArtwork $artwork): Response
     {
         $table = $type === 'artist' ? 'music_artists' : 'music_releases';
         $pivot = $type === 'artist' ? 'listen_artists' : 'listen_releases';
@@ -232,6 +236,8 @@ class MusicEntityController extends Controller
             ->orderByDesc('listens.id')->paginate(25)->withQueryString();
 
         return Inertia::render('music-entities/show', [
+            'artworkEnabled' => (bool) config('artwork.enabled'),
+            'artwork' => config('artwork.enabled') && $type === 'album' ? Inertia::defer(fn () => $artwork->cover($entity->mbid), 'artwork') : null,
             'entity' => ['mbid' => $entity->mbid, 'name' => $entity->name, 'type' => $type,
                 'nameSource' => $type === 'artist' ? $entity->name_source : null],
             'tracks' => $tracks,

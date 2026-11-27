@@ -1,5 +1,9 @@
 import { Head, Link, useHttp, usePage, usePoll } from '@inertiajs/react';
 import { useRef, useState } from 'react';
+import AlbumCover from '@/components/album-cover';
+import type { ArtworkProps } from '@/components/album-cover';
+import ArtworkPicker from '@/components/artwork-picker';
+import DetailHeader from '@/components/detail-header';
 import Form from '@/components/form';
 import InputError from '@/components/input-error';
 import { Button } from '@/components/ui/button';
@@ -95,7 +99,7 @@ type Listen = {
     };
 };
 
-type Props = {
+type Props = ArtworkProps & {
     listen: Listen;
     related: Listen[];
     musicbrainzEnabled: boolean;
@@ -210,6 +214,9 @@ export default function ListenDetails({
     musicBrainzSeed,
     matchedArtists,
     matchedAlbums,
+    artwork,
+    artworkEnabled,
+    artworkResult,
 }: Props) {
     const associationActive =
         recordingAssociation?.status === 'queued' ||
@@ -375,14 +382,20 @@ export default function ListenDetails({
     return (
         <>
             <Head title={listen.track_name} />
-            <div className="flex flex-col gap-6 p-4 md:p-6">
-                <Link href={index()} className="text-sm underline">
-                    Back to listening history
-                </Link>
-                <div>
-                    <h1 className="text-2xl font-semibold">
-                        {listen.track_name}
-                    </h1>
+            <div className="flex min-w-0 flex-col gap-5 px-5 py-8 [overflow-wrap:anywhere] sm:px-8">
+                <DetailHeader
+                    back={index()}
+                    backLabel="Back to listening history"
+                    eyebrow="Listen details"
+                    title={listen.track_name}
+                    media={
+                        <AlbumCover
+                            artworkEnabled={artworkEnabled}
+                            artwork={artwork}
+                            title={listen.release_name ?? listen.track_name}
+                        />
+                    }
+                >
                     <p className="text-muted-foreground">
                         {matchedArtists.length === 1 ? (
                             <Link
@@ -444,7 +457,27 @@ export default function ListenDetails({
                             ))}
                         </div>
                     )}
-                </div>
+                    <div className="flex flex-wrap gap-2">
+                        <span className="rounded-full border bg-card px-3 py-1 text-xs font-medium">
+                            {listen.source === 'spotify'
+                                ? 'Spotify'
+                                : 'Apple Music'}
+                        </span>
+                        <span className="rounded-full border bg-card px-3 py-1 text-xs font-medium">
+                            {listen.recording_mbid
+                                ? 'MusicBrainz matched'
+                                : 'Unmatched recording'}
+                        </span>
+                    </div>
+                </DetailHeader>
+                {artworkEnabled && listen.release_name?.trim() && (
+                    <ArtworkPicker
+                        key={listen.id}
+                        listenId={listen.id}
+                        album={listen.release_name}
+                        result={artworkResult}
+                    />
+                )}
                 {matchResult !== null && (
                     <p role="status" className="text-sm">
                         Identified {matchResult} matching listens. This choice
@@ -471,10 +504,10 @@ export default function ListenDetails({
                         {mergeResult}
                     </p>
                 )}
-                <section className="rounded-xl border p-5">
+                <section className="rounded-xl border bg-card p-5 shadow-sm sm:p-6">
                     <h2 className="text-lg font-semibold">Listen details</h2>
-                    <dl className="mt-4 grid gap-3 text-sm sm:grid-cols-2">
-                        <div>
+                    <dl className="mt-4 grid grid-cols-2 gap-x-6 gap-y-3 text-sm [overflow-wrap:anywhere] xl:grid-cols-3">
+                        <div className="col-span-2 sm:col-span-1">
                             <dt className="text-muted-foreground">Played at</dt>
                             <dd>{date(listen.listened_at)}</dd>
                         </div>
@@ -523,66 +556,73 @@ export default function ListenDetails({
                                     : 'Unmatched'}
                             </dd>
                         </div>
-                        {appleDetails.map(({ label, value }) => (
-                            <div key={label}>
-                                <dt className="text-muted-foreground">
-                                    {label}
-                                </dt>
-                                <dd>{value}</dd>
-                            </div>
-                        ))}
-                        {spotifyDetails.map(({ label, value }) => (
-                            <div key={label}>
-                                <dt className="text-muted-foreground">
-                                    {label}
-                                </dt>
-                                <dd>
-                                    {typeof value === 'boolean'
-                                        ? value
-                                            ? 'Yes'
-                                            : 'No'
-                                        : value}
-                                </dd>
-                            </div>
-                        ))}
                     </dl>
-                    <div className="mt-4 flex flex-wrap gap-4 text-sm">
-                        {listen.recording_mbid && (
-                            <a
-                                className="underline"
-                                target="_blank"
-                                rel="noreferrer"
-                                href={`https://musicbrainz.org/recording/${encodeURIComponent(listen.recording_mbid)}`}
-                            >
-                                MusicBrainz recording
-                            </a>
-                        )}
-                        {info.release_mbid && (
-                            <a
-                                className="underline"
-                                target="_blank"
-                                rel="noreferrer"
-                                href={`https://musicbrainz.org/release/${encodeURIComponent(info.release_mbid)}`}
-                            >
-                                MusicBrainz release
-                            </a>
-                        )}
-                        {info.artist_mbids?.map((id) => (
-                            <a
-                                key={id}
-                                className="underline"
-                                target="_blank"
-                                rel="noreferrer"
-                                href={`https://musicbrainz.org/artist/${encodeURIComponent(id)}`}
-                            >
-                                {matchedArtists.find(
-                                    (artist) => artist.mbid === id,
-                                )?.name ?? 'MusicBrainz artist'}
-                            </a>
-                        ))}
-                    </div>
+                    <details className="mt-5 border-t pt-4">
+                        <summary className="cursor-pointer text-sm font-medium">
+                            Playback metadata and identifiers
+                        </summary>
+                        <dl className="mt-4 grid gap-x-6 gap-y-3 text-sm [overflow-wrap:anywhere] sm:grid-cols-2 xl:grid-cols-3">
+                            {appleDetails.map(({ label, value }) => (
+                                <div key={label}>
+                                    <dt className="text-muted-foreground">
+                                        {label}
+                                    </dt>
+                                    <dd>{value}</dd>
+                                </div>
+                            ))}
+                            {spotifyDetails.map(({ label, value }) => (
+                                <div key={label}>
+                                    <dt className="text-muted-foreground">
+                                        {label}
+                                    </dt>
+                                    <dd>
+                                        {typeof value === 'boolean'
+                                            ? value
+                                                ? 'Yes'
+                                                : 'No'
+                                            : value}
+                                    </dd>
+                                </div>
+                            ))}
+                        </dl>
+                        <div className="mt-4 flex flex-wrap gap-4 text-sm">
+                            {listen.recording_mbid && (
+                                <a
+                                    className="underline"
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    href={`https://musicbrainz.org/recording/${encodeURIComponent(listen.recording_mbid)}`}
+                                >
+                                    MusicBrainz recording
+                                </a>
+                            )}
+                            {info.release_mbid && (
+                                <a
+                                    className="underline"
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    href={`https://musicbrainz.org/release/${encodeURIComponent(info.release_mbid)}`}
+                                >
+                                    MusicBrainz release
+                                </a>
+                            )}
+                            {info.artist_mbids?.map((id) => (
+                                <a
+                                    key={id}
+                                    className="underline"
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    href={`https://musicbrainz.org/artist/${encodeURIComponent(id)}`}
+                                >
+                                    {matchedArtists.find(
+                                        (artist) => artist.mbid === id,
+                                    )?.name ?? 'MusicBrainz artist'}
+                                </a>
+                            ))}
+                        </div>
+                    </details>
                 </section>
-                <section className="rounded-xl border p-5">
+                <section className="rounded-xl border bg-card p-5 shadow-sm sm:p-6">
                     <h2 className="text-lg font-semibold">
                         Link recordings across catalogs
                     </h2>
@@ -794,7 +834,7 @@ export default function ListenDetails({
                         </p>
                     )}
                 </section>
-                <section className="rounded-xl border p-5">
+                <section className="rounded-xl border bg-card p-5 shadow-sm sm:p-6">
                     <h2 className="text-lg font-semibold">Catalog matches</h2>
                     <p className="mt-2 text-sm text-muted-foreground">
                         Search a catalog, copy the track link, and confirm its
@@ -1189,7 +1229,7 @@ export default function ListenDetails({
                     )}
                 </section>
                 {listen.recording_mbid === null && (
-                    <section className="rounded-xl border p-5">
+                    <section className="rounded-xl border border-emerald-200 bg-emerald-50/40 p-5 sm:p-6 dark:border-emerald-900 dark:bg-emerald-950/15">
                         <h2 className="text-lg font-semibold">
                             Identify this song
                         </h2>
@@ -1503,7 +1543,7 @@ export default function ListenDetails({
                         </>
                     </section>
                 )}
-                <section className="rounded-xl border p-5">
+                <section className="rounded-xl border bg-card p-5 shadow-sm sm:p-6">
                     <h2 className="text-lg font-semibold">Related listens</h2>
                     {related.length === 0 ? (
                         <p className="mt-3 text-sm text-muted-foreground">
@@ -1512,13 +1552,18 @@ export default function ListenDetails({
                     ) : (
                         <ul className="mt-3 divide-y">
                             {related.map((item) => (
-                                <li key={item.id} className="py-2 text-sm">
+                                <li key={item.id} className="py-3 text-sm">
                                     <Link
-                                        className="underline"
+                                        className="flex flex-col gap-1 rounded-sm underline-offset-4 hover:underline sm:flex-row sm:justify-between sm:gap-4"
                                         href={show(item.id)}
                                     >
-                                        {item.track_name} · {item.artist_name} ·{' '}
-                                        {date(item.listened_at)}
+                                        <span className="min-w-0 font-medium [overflow-wrap:anywhere]">
+                                            {item.track_name} ·{' '}
+                                            {item.artist_name}
+                                        </span>
+                                        <span className="shrink-0 text-xs text-muted-foreground">
+                                            {date(item.listened_at)}
+                                        </span>
                                     </Link>
                                 </li>
                             ))}

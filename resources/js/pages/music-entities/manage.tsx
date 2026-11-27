@@ -1,4 +1,8 @@
 import { Head, Link, usePage, usePoll } from '@inertiajs/react';
+import AlbumCover from '@/components/album-cover';
+import type { ArtworkProps } from '@/components/album-cover';
+import ArtworkPicker from '@/components/artwork-picker';
+import DetailHeader from '@/components/detail-header';
 import Form from '@/components/form';
 import InputError from '@/components/input-error';
 import { Button } from '@/components/ui/button';
@@ -9,7 +13,7 @@ import { index as artistsIndex, show as artistShow } from '@/routes/artists';
 import { show as listenShow } from '@/routes/listens';
 import { catalog, manage, musicbrainz, remove } from '@/routes/music-entities';
 
-type Props = {
+type Props = ArtworkProps & {
     type: 'artist' | 'album';
     item: {
         listen_id: number;
@@ -73,6 +77,9 @@ export default function ManageMusicEntity({
     entityResult,
     artistScan,
     musicBrainzSeed,
+    artworkEnabled,
+    artwork,
+    artworkResult,
 }: Props) {
     const { errors } = usePage().props;
     const args = { type, listen: item.listen_id };
@@ -82,12 +89,21 @@ export default function ManageMusicEntity({
     return (
         <>
             <Head title={`Match ${title}`} />
-            <div className="flex flex-col gap-6 p-4 md:p-6">
-                <Link href={indexRoute()} className="text-sm underline">
-                    Back to {type === 'artist' ? 'artists' : 'albums'}
-                </Link>
-                <div>
-                    <h1 className="text-2xl font-semibold">{title}</h1>
+            <div className="flex min-w-0 flex-col gap-5 px-5 py-8 [overflow-wrap:anywhere] sm:px-8">
+                <DetailHeader
+                    back={indexRoute()}
+                    backLabel={`Back to ${type === 'artist' ? 'artists' : 'albums'}`}
+                    eyebrow={`Your ${type} group`}
+                    title={title ?? 'Unknown album'}
+                    media={
+                        <AlbumCover
+                            artworkEnabled={artworkEnabled}
+                            artwork={artwork}
+                            title={title ?? 'Unknown album'}
+                            artist={type === 'artist'}
+                        />
+                    }
+                >
                     {type === 'album' && (
                         <p className="text-muted-foreground">
                             {item.artist_name}
@@ -135,8 +151,16 @@ export default function ManageMusicEntity({
                             )}
                         </div>
                     )}
-                </div>
-                <section className="rounded-xl border p-4">
+                </DetailHeader>
+                {artworkEnabled && type === 'album' && item.release_name && (
+                    <ArtworkPicker
+                        key={item.listen_id}
+                        listenId={item.listen_id}
+                        album={item.release_name}
+                        result={artworkResult}
+                    />
+                )}
+                <section className="rounded-xl border bg-card p-5 shadow-sm sm:p-6">
                     <h2 className="text-lg font-semibold">
                         Current MusicBrainz associations
                     </h2>
@@ -192,7 +216,7 @@ export default function ManageMusicEntity({
                         Showing up to 30 associations.
                     </p>
                 </section>
-                <section className="rounded-xl border p-4">
+                <section className="rounded-xl border border-emerald-200 bg-emerald-50/40 p-5 sm:p-6 dark:border-emerald-900 dark:bg-emerald-950/15">
                     <h2 className="text-lg font-semibold">Match MusicBrainz</h2>
                     {musicBrainzSeed && (
                         <div className="mt-3 text-sm">
@@ -430,7 +454,7 @@ export default function ManageMusicEntity({
                         )}
                     </div>
                 </section>
-                <section className="rounded-xl border p-4">
+                <section className="rounded-xl border bg-card p-5 shadow-sm sm:p-6">
                     <h2 className="text-lg font-semibold">Catalog links</h2>
                     <p className="mt-1 text-sm text-muted-foreground">
                         Paste an {type} URL, or a Spotify {type} URI. Catalog
@@ -486,7 +510,7 @@ export default function ManageMusicEntity({
                                             name="provider"
                                             value={provider}
                                         />
-                                        <div className="min-w-60 flex-1">
+                                        <div className="min-w-0 flex-1 sm:min-w-60">
                                             <Label
                                                 htmlFor={`${provider}-url`}
                                                 className="sr-only"
@@ -517,23 +541,27 @@ export default function ManageMusicEntity({
                         </div>
                     ))}
                 </section>
-                <section className="rounded-xl border p-4">
+                <section className="rounded-xl border bg-card p-5 shadow-sm sm:p-6">
                     <h2 className="text-lg font-semibold">Related listens</h2>
                     <ul className="mt-3 divide-y">
                         {listens.data.map((listen) => (
-                            <li key={listen.id} className="py-2 text-sm">
+                            <li
+                                key={listen.id}
+                                className="flex flex-col gap-1 py-3 text-sm sm:flex-row sm:justify-between sm:gap-4"
+                            >
                                 <Link
                                     href={listenShow(listen.id)}
-                                    className="underline"
+                                    className="min-w-0 font-medium [overflow-wrap:anywhere] underline-offset-4 hover:underline"
                                 >
                                     {listen.track_name}
-                                </Link>{' '}
-                                ·{' '}
-                                {new Date(listen.listened_at * 1000)
-                                    .toISOString()
-                                    .replace('T', ' ')
-                                    .slice(0, 19)}{' '}
-                                UTC
+                                </Link>
+                                <span className="shrink-0 text-xs text-muted-foreground">
+                                    {new Date(listen.listened_at * 1000)
+                                        .toISOString()
+                                        .replace('T', ' ')
+                                        .slice(0, 19)}{' '}
+                                    UTC
+                                </span>
                             </li>
                         ))}
                     </ul>

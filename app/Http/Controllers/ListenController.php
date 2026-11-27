@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Http\Requests\ImportListensRequest;
 use App\Jobs\ProcessRecordingAssociation;
 use App\Models\Listen;
+use App\Services\AlbumArtwork;
 use App\Services\CatalogMatcher;
 use App\Services\CatalogRecordingGroups;
 use App\Services\Isrc;
@@ -109,7 +110,7 @@ class ListenController extends Controller
         return to_route('listens.create')->with('import_result', $result);
     }
 
-    public function show(Request $request, int $listen, MusicBrainzMatcher $matcher, CatalogMatcher $catalogMatcher, CatalogRecordingGroups $groups, MusicBrainzApi $api): Response
+    public function show(Request $request, int $listen, MusicBrainzMatcher $matcher, CatalogMatcher $catalogMatcher, CatalogRecordingGroups $groups, MusicBrainzApi $api, AlbumArtwork $artwork): Response
     {
         $values = $request->validate([
             'q' => ['nullable', 'string', 'max:255'],
@@ -184,6 +185,9 @@ class ListenController extends Controller
         }
 
         return Inertia::render('listens/show', [
+            'artworkEnabled' => (bool) config('artwork.enabled'),
+            'artwork' => config('artwork.enabled') ? Inertia::defer(fn () => $artwork->forListen($item), 'artwork') : null,
+            'artworkResult' => $request->session()->get('artwork_result'),
             'listen' => $item,
             'related' => $related,
             'musicbrainzEnabled' => (bool) config('musicbrainz.enabled'),

@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Controllers\AlbumArtworkController;
 use App\Http\Controllers\BulkMusicBrainzController;
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\ImportController;
@@ -12,6 +13,10 @@ use Illuminate\Support\Facades\Route;
 Route::inertia('/', 'welcome')->name('home');
 
 Route::middleware(['auth', 'verified'])->group(function () {
+    Route::get('artwork/{mbid}', [AlbumArtworkController::class, 'image'])->name('artwork.image');
+    Route::post('listens/{listen}/artwork/search', [AlbumArtworkController::class, 'search'])->middleware('throttle:30,1')->name('artwork.search');
+    Route::post('listens/{listen}/artwork', [AlbumArtworkController::class, 'store'])->middleware('throttle:30,1')->name('artwork.store');
+    Route::delete('listens/{listen}/artwork', [AlbumArtworkController::class, 'destroy'])->name('artwork.destroy');
     Route::get('dashboard', DashboardController::class)->name('dashboard');
     Route::get('listens', [ListenController::class, 'index'])->name('listens.index');
     Route::post('listens/bulk-musicbrainz/selection', [BulkMusicBrainzController::class, 'selection'])->name('listens.bulk-musicbrainz.selection');
