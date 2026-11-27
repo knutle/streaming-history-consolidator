@@ -42,7 +42,7 @@ const features = [
 ];
 
 export default function Welcome() {
-    const { auth } = usePage().props;
+    const { auth, canRegister } = usePage().props;
 
     return (
         <>
@@ -77,9 +77,13 @@ export default function Welcome() {
                                     <Button asChild variant="ghost" size="sm">
                                         <Link href={login()}>Log in</Link>
                                     </Button>
-                                    <Button asChild size="sm">
-                                        <Link href={register()}>Register</Link>
-                                    </Button>
+                                    {canRegister && (
+                                        <Button asChild size="sm">
+                                            <Link href={register()}>
+                                                Register
+                                            </Link>
+                                        </Button>
+                                    )}
                                 </>
                             )}
                         </nav>
@@ -107,9 +111,13 @@ export default function Welcome() {
                                         <Link href={dashboard()}>
                                             Go to dashboard <ArrowRight />
                                         </Link>
-                                    ) : (
+                                    ) : canRegister ? (
                                         <Link href={register()}>
                                             Get started <ArrowRight />
+                                        </Link>
+                                    ) : (
+                                        <Link href={login()}>
+                                            Log in <ArrowRight />
                                         </Link>
                                     )}
                                 </Button>

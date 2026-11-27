@@ -5,12 +5,15 @@ namespace App\Actions\Fortify;
 use App\Concerns\PasswordValidationRules;
 use App\Concerns\ProfileValidationRules;
 use App\Models\User;
+use App\Rules\AllowedRegistrationEmail;
 use Illuminate\Support\Facades\Validator;
 use Laravel\Fortify\Contracts\CreatesNewUsers;
 
 class CreateNewUser implements CreatesNewUsers
 {
     use PasswordValidationRules, ProfileValidationRules;
+
+    public function __construct(private readonly AllowedRegistrationEmail $allowedEmail) {}
 
     /**
      * Validate and create a newly registered user.
@@ -21,6 +24,7 @@ class CreateNewUser implements CreatesNewUsers
     {
         Validator::make($input, [
             ...$this->profileRules(),
+            'email' => [...$this->emailRules(), $this->allowedEmail],
             'password' => $this->passwordRules(),
         ])->validate();
 
