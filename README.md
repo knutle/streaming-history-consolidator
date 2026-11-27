@@ -1,4 +1,6 @@
-# Streaming History Consolidator
+# playweft
+
+A streaming history consolidator.
 
 Bring Spotify and Apple Music listening history together in one place. Import your exports, browse a combined timeline, identify recordings with MusicBrainz, and link equivalent catalog tracks without merging their individual plays.
 
@@ -41,6 +43,8 @@ npm install
 ```
 
 The local Sail stack provides the app, MySQL, Redis, Mailpit, and Selenium. The example configuration serves the app at [http://localhost:8000](http://localhost:8000).
+
+Existing installations can set `APP_NAME=playweft` in their environment for notifications and other server-side branding. Changing it may also change default session cookie and cache prefixes.
 
 Start the frontend development server in a separate terminal:
 

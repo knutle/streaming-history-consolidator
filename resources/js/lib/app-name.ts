@@ -1,1 +1,1 @@
-export const appName = 'Streaming History Consolidator';
+export const appName = 'playweft';

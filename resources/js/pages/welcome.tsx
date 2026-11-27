@@ -61,8 +61,7 @@ export default function Welcome() {
                                     className="size-5"
                                 />
                             </span>
-                            <span className="sm:hidden">History</span>
-                            <span className="hidden sm:inline">{appName}</span>
+                            <span>{appName}</span>
                         </a>
                         <nav
                             aria-label="Account"

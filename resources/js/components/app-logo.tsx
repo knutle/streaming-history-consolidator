@@ -8,8 +8,7 @@ export default function AppLogo() {
                 <AppLogoIcon className="size-5" />
             </span>
             <span className="min-w-0 truncate text-sm font-semibold tracking-tight">
-                <span className="sm:hidden">History</span>
-                <span className="hidden sm:inline">{appName}</span>
+                {appName}
             </span>
         </span>
     );
