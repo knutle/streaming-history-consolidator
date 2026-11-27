@@ -86,6 +86,49 @@ class MusicBrainzApiMatchingTest extends TestCase
         Sleep::assertSleptTimes(1);
     }
 
+    public function test_api_recording_suggestions_show_release_details_and_missing_metadata(): void
+    {
+        Http::preventStrayRequests();
+        $listen = $this->importedListen();
+        $recording = $this->recording();
+        $recording['first-release-date'] = '1998-06-01';
+        $recording['releases'] = [
+            ['id' => '33333333-3333-4333-8333-333333333333', 'title' => 'Collection',
+                'artist-credit' => [
+                    ['name' => 'First', 'joinphrase' => ' & '], ['name' => 'Second'],
+                ],
+                'release-group' => ['primary-type' => 'Album', 'secondary-types' => ['Compilation']]],
+            ['id' => '44444444-4444-4444-8444-444444444444', 'title' => 'Untitled metadata'],
+        ];
+        Http::fake(['musicbrainz.org/ws/2/recording?*' => Http::response(['count' => 1, 'recordings' => [$recording]])]);
+
+        $this->get(route('listens.show', ['listen' => $listen->id, 'q' => 'Song', 'search_source' => 'api']))
+            ->assertOk()->assertInertia(fn (Assert $page) => $page
+            ->where('suggestions.0.first_release_year', 1998)
+            ->where('suggestions.0.releases', [
+                ['mbid' => '33333333-3333-4333-8333-333333333333', 'title' => 'Collection',
+                    'artist' => 'First & Second', 'group_type' => 'Album / Compilation'],
+                ['mbid' => '44444444-4444-4444-8444-444444444444', 'title' => 'Untitled metadata',
+                    'artist' => null, 'group_type' => null],
+            ]));
+        Http::assertSentCount(1);
+    }
+
+    public function test_api_search_reports_malformed_release_metadata(): void
+    {
+        Http::preventStrayRequests();
+        $listen = $this->importedListen();
+        $recording = $this->recording();
+        $recording['releases'] = [['id' => '33333333-3333-4333-8333-333333333333', 'title' => 'Album', 'release-group' => ['secondary-types' => 'Compilation']]];
+        Http::fake(['musicbrainz.org/ws/2/recording?*' => Http::response(['count' => 1, 'recordings' => [$recording]])]);
+
+        $this->get(route('listens.show', ['listen' => $listen->id, 'q' => 'Song', 'search_source' => 'api']))
+            ->assertOk()->assertInertia(fn (Assert $page) => $page
+            ->where('apiError', 'MusicBrainz returned invalid release group metadata.')
+            ->has('suggestions', 0));
+        Http::assertSentCount(1);
+    }
+
     public function test_local_default_and_other_users_never_trigger_api_requests(): void
     {
         Http::preventStrayRequests();

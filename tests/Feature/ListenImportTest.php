@@ -83,6 +83,28 @@ class ListenImportTest extends TestCase
             $table->integer('id')->primary();
             $table->string('gid');
             $table->string('name');
+            $table->integer('artist_credit')->default(1);
+            $table->integer('release_group')->nullable();
+        });
+        $schema->create('recording_first_release_date', function (Blueprint $table) {
+            $table->integer('recording')->primary();
+            $table->integer('year')->nullable();
+        });
+        $schema->create('release_group', function (Blueprint $table) {
+            $table->integer('id')->primary();
+            $table->integer('type')->nullable();
+        });
+        $schema->create('release_group_primary_type', function (Blueprint $table) {
+            $table->integer('id')->primary();
+            $table->string('name');
+        });
+        $schema->create('release_group_secondary_type', function (Blueprint $table) {
+            $table->integer('id')->primary();
+            $table->string('name');
+        });
+        $schema->create('release_group_secondary_type_join', function (Blueprint $table) {
+            $table->integer('release_group');
+            $table->integer('secondary_type');
         });
         $schema->create('medium', function (Blueprint $table) {
             $table->integer('id')->primary();
@@ -443,6 +465,17 @@ class ListenImportTest extends TestCase
         });
         $this->assertSame('22222222-2222-4222-8222-222222222222', $listen->fresh()->recording_mbid);
         Http::assertSentCount(1);
+        $this->post(route('listens.import'), [
+            'source' => 'spotify', 'file' => $this->spotify([$this->row('2024-01-02T12:00:00Z', track: 'Unmatched')]),
+        ])->assertSessionHasNoErrors();
+        $unmatched = Listen::query()->latest('id')->firstOrFail();
+        $this->get(route('listens.show', ['listen' => $unmatched->id, 'q' => 'Track']))
+            ->assertOk()->assertInertia(fn (Assert $page) => $page
+            ->where('suggestions.0.first_release_year', null)
+            ->where('suggestions.0.releases.0', [
+                'mbid' => '33333333-3333-4333-8333-333333333333', 'title' => 'Album',
+                'artist' => null, 'group_type' => null,
+            ]));
     }
 
     public function test_ambiguous_artist_aliases_do_not_identify_a_recording(): void
@@ -592,6 +625,39 @@ class ListenImportTest extends TestCase
             ->assertInertia(fn (Assert $page) => $page->has('suggestions', 30)->where('hasMore', true));
         $this->get(route('listens.show', ['listen' => $listen->id, 'q' => 'Tra', 'artist' => 'other', 'page' => 2]))
             ->assertInertia(fn (Assert $page) => $page->has('suggestions', 1)->where('hasMore', false));
+    }
+
+    public function test_local_recording_suggestions_show_first_release_year_and_distinct_release_metadata(): void
+    {
+        $this->musicbrainz();
+        $db = DB::connection('musicbrainz');
+        $db->table('recording_first_release_date')->insert(['recording' => 1, 'year' => 1995]);
+        $db->table('artist_credit')->insert(['id' => 2, 'name' => 'Various Artists']);
+        $db->table('release_group_primary_type')->insert(['id' => 1, 'name' => 'Album']);
+        $db->table('release_group_secondary_type')->insert(['id' => 1, 'name' => 'Compilation']);
+        $db->table('release_group')->insert(['id' => 1, 'type' => 1]);
+        $db->table('release_group_secondary_type_join')->insert(['release_group' => 1, 'secondary_type' => 1]);
+        $db->table('release')->where('id', 1)->update(['artist_credit' => 2, 'release_group' => 1]);
+        $db->table('track')->insert(['recording' => 1, 'medium' => 1]);
+        $db->table('release')->insert(['id' => 2, 'gid' => '44444444-4444-4444-8444-444444444444', 'name' => 'Single']);
+        $db->table('medium')->insert(['id' => 2, 'release' => 2]);
+        $db->table('track')->insert(['recording' => 1, 'medium' => 2]);
+        $this->actingAs(User::factory()->create())->post(route('listens.import'), [
+            'source' => 'spotify', 'file' => $this->spotify([$this->row('2024-01-01T12:00:00Z', album: 'Unknown')]),
+        ])->assertSessionHasNoErrors();
+        $listen = Listen::query()->sole();
+
+        $this->get(route('listens.show', ['listen' => $listen->id, 'q' => 'Track']))
+            ->assertOk()->assertInertia(fn (Assert $page) => $page
+            ->where('suggestions.0.first_release_year', 1995)
+            ->has('suggestions.0.releases', 2)
+            ->where('suggestions.0.releases.0', [
+                'mbid' => '33333333-3333-4333-8333-333333333333', 'title' => 'Album',
+                'artist' => 'Various Artists', 'group_type' => 'Album / Compilation',
+            ])->where('suggestions.0.releases.1', [
+                'mbid' => '44444444-4444-4444-8444-444444444444', 'title' => 'Single',
+                'artist' => 'Artist', 'group_type' => null,
+            ]));
     }
 
     public function test_listen_details_and_manual_matches_are_scoped_to_the_owner_and_validate_recordings(): void

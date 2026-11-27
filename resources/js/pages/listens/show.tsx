@@ -138,6 +138,13 @@ type Props = {
         recording_mbid: string;
         track_name: string;
         artist_name: string;
+        first_release_year: number | null;
+        releases: {
+            mbid: string;
+            title: string;
+            artist: string | null;
+            group_type: string | null;
+        }[];
     }[];
 };
 
@@ -1288,6 +1295,14 @@ export default function ListenDetails({
                             <h3 className="mt-5 font-medium">
                                 Suggested recordings
                             </h3>
+                            {searchSource === 'api' &&
+                                suggestions.length > 0 && (
+                                    <p className="mt-1 text-xs text-muted-foreground">
+                                        Releases shown are those returned by
+                                        MusicBrainz search and may be
+                                        incomplete.
+                                    </p>
+                                )}
                             {apiError ||
                             (!musicbrainzEnabled &&
                                 searchSource ===
@@ -1309,6 +1324,11 @@ export default function ListenDetails({
                                                     {item.track_name} ·{' '}
                                                     {item.artist_name}
                                                 </p>
+                                                <p className="text-muted-foreground">
+                                                    First release year:{' '}
+                                                    {item.first_release_year ??
+                                                        'Unknown'}
+                                                </p>
                                                 <a
                                                     className="text-muted-foreground underline"
                                                     target="_blank"
@@ -1318,6 +1338,46 @@ export default function ListenDetails({
                                                     View recording on
                                                     MusicBrainz
                                                 </a>
+                                                {item.releases.length === 0 ? (
+                                                    <p className="mt-2 text-muted-foreground">
+                                                        No release details
+                                                        available.
+                                                    </p>
+                                                ) : (
+                                                    <div className="mt-2">
+                                                        <p className="font-medium">
+                                                            Related releases
+                                                        </p>
+                                                        <ul className="mt-1 space-y-1">
+                                                            {item.releases.map(
+                                                                (release) => (
+                                                                    <li
+                                                                        key={
+                                                                            release.mbid
+                                                                        }
+                                                                    >
+                                                                        <a
+                                                                            className="underline"
+                                                                            target="_blank"
+                                                                            rel="noreferrer"
+                                                                            href={`https://musicbrainz.org/release/${encodeURIComponent(release.mbid)}`}
+                                                                        >
+                                                                            {
+                                                                                release.title
+                                                                            }
+                                                                        </a>
+                                                                        {' · '}
+                                                                        {release.artist ??
+                                                                            'Unknown release artist'}
+                                                                        {' · '}
+                                                                        {release.group_type ??
+                                                                            'Unknown release group type'}
+                                                                    </li>
+                                                                ),
+                                                            )}
+                                                        </ul>
+                                                    </div>
+                                                )}
                                             </div>
                                             <Form {...match.form(listen.id)}>
                                                 {({ processing }) => (

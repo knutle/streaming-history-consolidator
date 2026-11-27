@@ -68,7 +68,7 @@ class MusicBrainzMatcher
         return $exists ? ['mbid' => $mbid, 'name' => $name, 'source' => $source] : null;
     }
 
-    /** @return array{results: list<array{recording_mbid: string, track_name: string, artist_name: string}>, hasMore: bool} */
+    /** @return array{results: list<array{recording_mbid: string, track_name: string, artist_name: string, first_release_year: ?int, releases: list<array{mbid: string, title: string, artist: ?string, group_type: ?string}>}>, hasMore: bool} */
     public function search(string $prefix, string $artist, int $page): array
     {
         if (! config('musicbrainz.enabled') || trim($prefix) === '') {
@@ -79,7 +79,8 @@ class MusicBrainzMatcher
         $artist = trim($artist);
         $pattern = '%'.str_replace(['!', '%', '_'], ['!!', '!%', '!_'], mb_strtolower($artist)).'%';
         $db = DB::connection('musicbrainz');
-        if (config('musicbrainz.format') === 'canonical' && $db->getDriverName() === 'sqlite') {
+        $canonical = config('musicbrainz.format') === 'canonical' && $db->getDriverName() === 'sqlite';
+        if ($canonical) {
             $query = $db->table('canonical_recordings')
                 ->where('recording_name', '>=', $prefix)
                 ->where('recording_name', '<', $prefix."\u{10ffff}")
@@ -91,21 +92,70 @@ class MusicBrainzMatcher
         } else {
             $query = $db->table('recording')
                 ->join('artist_credit', 'recording.artist_credit', '=', 'artist_credit.id')
+                ->leftJoin('recording_first_release_date', 'recording_first_release_date.recording', '=', 'recording.id')
                 ->where('recording.name', '>=', $prefix)
                 ->where('recording.name', '<', $prefix."\u{10ffff}")
-                ->select('recording.gid as recording_mbid', 'recording.name as track_name', 'artist_credit.name as artist_name')
+                ->select('recording.gid as recording_mbid', 'recording.name as track_name', 'artist_credit.name as artist_name',
+                    'recording_first_release_date.year as first_release_year')
                 ->orderBy('recording.name')->orderBy('recording.gid');
             if ($artist !== '') {
                 $query->whereRaw("LOWER(artist_credit.name) LIKE ? ESCAPE '!'", [$pattern]);
             }
         }
         $rows = $query->offset(($page - 1) * 30)->limit(31)->get();
+        $pageRows = $rows->take(30);
+        $ids = $pageRows->pluck('recording_mbid')->unique()->values()->all();
+        $releases = [];
+        if ($ids !== [] && $canonical) {
+            $releaseRows = $db->table('canonical_recordings')
+                ->whereIn('recording_name', $pageRows->pluck('track_name')->unique()->values()->all())
+                ->whereIn('recording_mbid', $ids)
+                ->distinct()->orderBy('release_name')->orderBy('release_mbid')
+                ->get(['recording_mbid', 'release_mbid', 'release_name']);
+            foreach ($releaseRows as $release) {
+                $releases[$release->recording_mbid][$release->release_mbid] = [
+                    'mbid' => (string) $release->release_mbid, 'title' => (string) $release->release_name,
+                    'artist' => null, 'group_type' => null,
+                ];
+            }
+        } elseif ($ids !== []) {
+            $releaseRows = $db->table('recording')
+                ->join('track', 'track.recording', '=', 'recording.id')
+                ->join('medium', 'medium.id', '=', 'track.medium')
+                ->join('release', 'release.id', '=', 'medium.release')
+                ->join('artist_credit as release_artist', 'release_artist.id', '=', 'release.artist_credit')
+                ->leftJoin('release_group', 'release_group.id', '=', 'release.release_group')
+                ->leftJoin('release_group_primary_type as primary_type', 'primary_type.id', '=', 'release_group.type')
+                ->leftJoin('release_group_secondary_type_join as secondary_join', 'secondary_join.release_group', '=', 'release_group.id')
+                ->leftJoin('release_group_secondary_type as secondary_type', 'secondary_type.id', '=', 'secondary_join.secondary_type')
+                ->whereIn('recording.gid', $ids)->distinct()
+                ->orderBy('release.name')->orderBy('release.gid')->orderBy('secondary_type.name')
+                ->get(['recording.gid as recording_mbid', 'release.gid as release_mbid', 'release.name as release_name',
+                    'release_artist.name as release_artist', 'primary_type.name as primary_type', 'secondary_type.name as secondary_type']);
+            foreach ($releaseRows as $release) {
+                $recordingId = (string) $release->recording_mbid;
+                $releaseId = (string) $release->release_mbid;
+                if (! isset($releases[$recordingId][$releaseId])) {
+                    $releases[$recordingId][$releaseId] = [
+                        'mbid' => $releaseId, 'title' => (string) $release->release_name,
+                        'artist' => (string) $release->release_artist, 'group_type' => $release->primary_type,
+                    ];
+                }
+                if ($release->secondary_type !== null) {
+                    $type = $releases[$recordingId][$releaseId]['group_type'];
+                    $releases[$recordingId][$releaseId]['group_type'] = $type === null
+                        ? (string) $release->secondary_type : $type.' / '.$release->secondary_type;
+                }
+            }
+        }
 
         return [
-            'results' => array_values($rows->take(30)->map(fn ($row) => [
+            'results' => array_values($pageRows->map(fn ($row) => [
                 'recording_mbid' => (string) $row->recording_mbid,
                 'track_name' => (string) $row->track_name,
                 'artist_name' => (string) $row->artist_name,
+                'first_release_year' => isset($row->first_release_year) ? (int) $row->first_release_year : null,
+                'releases' => array_values($releases[$row->recording_mbid] ?? []),
             ])->all()),
             'hasMore' => $rows->count() > 30,
         ];

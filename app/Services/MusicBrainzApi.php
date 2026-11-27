@@ -12,7 +12,7 @@ use Illuminate\Validation\ValidationException;
 
 class MusicBrainzApi
 {
-    /** @return array{results: list<array{recording_mbid: string, track_name: string, artist_name: string}>, hasMore: bool} */
+    /** @return array{results: list<array{recording_mbid: string, track_name: string, artist_name: string, first_release_year: ?int, releases: list<array{mbid: string, title: string, artist: ?string, group_type: ?string}>}>, hasMore: bool} */
     public function search(string $title, string $artist, int $page): array
     {
         if (trim($title) === '') {
@@ -30,14 +30,69 @@ class MusicBrainzApi
         $results = [];
         foreach ($data['recordings'] as $recording) {
             $match = $this->parseRecording($recording, 'musicbrainz_api');
+            $date = $recording['first-release-date'] ?? null;
+            if ($date !== null && (! is_string($date) || ($date !== '' && ! preg_match('/^\d{4}(?:-\d{2}(?:-\d{2})?)?$/D', $date)))) {
+                $this->fail('musicbrainz_api', 'MusicBrainz returned an invalid first release date.');
+            }
             $results[] = [
                 'recording_mbid' => $match['recording_mbid'],
                 'track_name' => $match['track_name'],
                 'artist_name' => $match['artist_name'],
+                'first_release_year' => $date === null || $date === '' ? null : (int) substr($date, 0, 4),
+                'releases' => $this->searchReleases($recording['releases'] ?? []),
             ];
         }
 
         return ['results' => $results, 'hasMore' => $offset + count($results) < $data['count']];
+    }
+
+    /** @return list<array{mbid: string, title: string, artist: ?string, group_type: ?string}> */
+    private function searchReleases(mixed $data): array
+    {
+        if (! is_array($data) || ! array_is_list($data)) {
+            $this->fail('musicbrainz_api', 'MusicBrainz returned invalid release metadata.');
+        }
+        $releases = [];
+        foreach ($data as $release) {
+            if (! is_array($release) || ! is_string($release['id'] ?? null) || ! Str::isUuid($release['id'])
+                || ! is_string($release['title'] ?? null) || trim($release['title']) === '') {
+                $this->fail('musicbrainz_api', 'MusicBrainz returned invalid release metadata.');
+            }
+            $artist = null;
+            if (isset($release['artist-credit'])) {
+                if (! is_array($release['artist-credit']) || ! array_is_list($release['artist-credit'])) {
+                    $this->fail('musicbrainz_api', 'MusicBrainz returned invalid release artist metadata.');
+                }
+                $artist = '';
+                foreach ($release['artist-credit'] as $credit) {
+                    $name = is_array($credit) ? ($credit['name'] ?? $credit['artist']['name'] ?? null) : null;
+                    if (! is_string($name) || trim($name) === '' || (isset($credit['joinphrase']) && ! is_string($credit['joinphrase']))) {
+                        $this->fail('musicbrainz_api', 'MusicBrainz returned invalid release artist metadata.');
+                    }
+                    $artist .= $name.($credit['joinphrase'] ?? '');
+                }
+                $artist = $artist === '' ? null : $artist;
+            }
+            $group = $release['release-group'] ?? [];
+            if (! is_array($group) || (isset($group['primary-type']) && ! is_string($group['primary-type']))
+                || (isset($group['secondary-types']) && (! is_array($group['secondary-types']) || ! array_is_list($group['secondary-types'])))) {
+                $this->fail('musicbrainz_api', 'MusicBrainz returned invalid release group metadata.');
+            }
+            $types = [];
+            foreach ([$group['primary-type'] ?? null, ...($group['secondary-types'] ?? [])] as $type) {
+                if ($type === null) {
+                    continue;
+                }
+                if (! is_string($type) || trim($type) === '') {
+                    $this->fail('musicbrainz_api', 'MusicBrainz returned invalid release group metadata.');
+                }
+                $types[] = $type;
+            }
+            $releases[$release['id']] = ['mbid' => $release['id'], 'title' => $release['title'], 'artist' => $artist,
+                'group_type' => $types === [] ? null : implode(' / ', array_unique($types))];
+        }
+
+        return array_values($releases);
     }
 
     /** @return array{recording_mbid: string, artist_name: string, artist_mbids: list<string>, release_mbid: null} */
