@@ -114,6 +114,66 @@ class MusicBrainzApiMatchingTest extends TestCase
         Http::assertSentCount(1);
     }
 
+    public function test_api_recording_match_saves_individual_musicbrainz_artist_names(): void
+    {
+        Http::preventStrayRequests();
+        $listen = $this->importedListen();
+        $recording = $this->recording();
+        $recording['artist-credit'] = [
+            ['name' => 'Credit alias', 'joinphrase' => ' & ',
+                'artist' => ['id' => '11111111-1111-4111-8111-111111111111', 'name' => 'Real artist']],
+            ['name' => 'Guest credit',
+                'artist' => ['id' => '33333333-3333-4333-8333-333333333333', 'name' => 'Real guest']],
+        ];
+        Http::fake(['musicbrainz.org/ws/2/recording/*' => Http::response($recording)]);
+
+        $this->post(route('listens.match', $listen->id), [
+            'recording_mbid' => $recording['id'], 'track_name' => 'Song',
+            'artist_name' => 'Credit alias & Guest credit', 'search_source' => 'api',
+        ])->assertSessionHas('match_result', 1);
+        $this->get(route('artists.show', '33333333-3333-4333-8333-333333333333'))
+            ->assertOk()->assertInertia(fn (Assert $page) => $page->where('entity.name', 'Real guest')
+            ->where('entity.nameSource', 'musicbrainz'));
+        $this->get(route('listens.show', $listen->id))->assertInertia(fn (Assert $page) => $page
+            ->where('matchedArtists.0.name', 'Real artist')->where('matchedArtists.1.name', 'Real guest'));
+        Http::assertSentCount(1);
+    }
+
+    public function test_missing_artist_name_can_be_fetched_only_for_a_users_own_listens(): void
+    {
+        Http::preventStrayRequests();
+        $listen = $this->importedListen();
+        $owner = User::query()->findOrFail($listen->user_id);
+        $id = DB::table('music_artists')->insertGetId(['mbid' => '11111111-1111-4111-8111-111111111111', 'name' => null]);
+        DB::table('listen_artists')->insert(['listen_id' => $listen->id, 'music_artist_id' => $id]);
+        $url = route('artists.lookup-name', '11111111-1111-4111-8111-111111111111');
+        Http::fake(['musicbrainz.org/ws/2/artist/*' => Http::response([
+            'id' => '11111111-1111-4111-8111-111111111111', 'name' => 'Verified artist',
+        ])]);
+
+        $this->actingAs(User::factory()->create())->post($url)->assertNotFound();
+        Http::assertNothingSent();
+        $this->actingAs($owner)->post($url)->assertRedirect(route('artists.show', '11111111-1111-4111-8111-111111111111'));
+        $this->get(route('artists.show', '11111111-1111-4111-8111-111111111111'))
+            ->assertInertia(fn (Assert $page) => $page->where('entity.name', 'Verified artist')->where('entity.nameSource', 'musicbrainz'));
+        $this->post($url)->assertRedirect(route('artists.show', '11111111-1111-4111-8111-111111111111'));
+        Http::assertSentCount(1);
+    }
+
+    public function test_missing_artist_name_lookup_reports_api_failure(): void
+    {
+        Http::preventStrayRequests();
+        $listen = $this->importedListen();
+        $id = DB::table('music_artists')->insertGetId(['mbid' => '11111111-1111-4111-8111-111111111111', 'name' => null]);
+        DB::table('listen_artists')->insert(['listen_id' => $listen->id, 'music_artist_id' => $id]);
+        Http::fake(['musicbrainz.org/ws/2/artist/*' => Http::response([], 503)]);
+
+        $this->post(route('artists.lookup-name', '11111111-1111-4111-8111-111111111111'))
+            ->assertSessionHasErrors('artist_name');
+        $this->assertDatabaseHas('music_artists', ['id' => $id, 'name' => null]);
+        Http::assertSentCount(1);
+    }
+
     public function test_api_search_reports_malformed_release_metadata(): void
     {
         Http::preventStrayRequests();

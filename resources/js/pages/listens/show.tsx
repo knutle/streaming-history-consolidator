@@ -538,7 +538,9 @@ export default function ListenDetails({
                                 rel="noreferrer"
                                 href={`https://musicbrainz.org/artist/${encodeURIComponent(id)}`}
                             >
-                                MusicBrainz artist
+                                {matchedArtists.find(
+                                    (artist) => artist.mbid === id,
+                                )?.name ?? 'MusicBrainz artist'}
                             </a>
                         ))}
                     </div>

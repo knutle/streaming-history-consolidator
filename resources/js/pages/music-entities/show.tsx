@@ -1,4 +1,7 @@
-import { Head, Link } from '@inertiajs/react';
+import { Form, Head, Link } from '@inertiajs/react';
+import InputError from '@/components/input-error';
+import { Button } from '@/components/ui/button';
+import { lookupName } from '@/routes/artists';
 import { index, show } from '@/routes/listens';
 
 type Props = {
@@ -45,6 +48,32 @@ export default function MusicEntityDetails({ entity, tracks, listens }: Props) {
                         <p className="text-sm text-muted-foreground">
                             Name from a MusicBrainz artist credit.
                         </p>
+                    )}
+                    {entity.type === 'artist' && entity.name === null && (
+                        <div className="my-2 text-sm">
+                            <p className="text-muted-foreground">
+                                The artist name is not available locally.
+                                Looking it up sends this artist&apos;s
+                                MusicBrainz ID to MusicBrainz.
+                            </p>
+                            <Form {...lookupName.form(entity.mbid)}>
+                                {({ processing, errors }) => (
+                                    <>
+                                        <Button
+                                            type="submit"
+                                            variant="outline"
+                                            size="sm"
+                                            disabled={processing}
+                                        >
+                                            Look up artist name
+                                        </Button>
+                                        <InputError
+                                            message={errors.artist_name}
+                                        />
+                                    </>
+                                )}
+                            </Form>
+                        </div>
                     )}
                     <a
                         className="text-sm underline"

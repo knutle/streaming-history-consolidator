@@ -32,6 +32,7 @@ Route::middleware(['auth', 'verified'])->group(function () {
     Route::post('music-entities/{type}/{listen}/catalog', [MusicEntityController::class, 'matchCatalog'])->name('music-entities.catalog');
     Route::delete('music-entities/{type}/{listen}/{kind}', [MusicEntityController::class, 'removeMatch'])->name('music-entities.remove');
     Route::get('artists/{mbid}', [MusicEntityController::class, 'artist'])->name('artists.show');
+    Route::post('artists/{mbid}/lookup-name', [MusicEntityController::class, 'lookupArtistName'])->name('artists.lookup-name');
     Route::get('albums/{mbid}', [MusicEntityController::class, 'album'])->name('albums.show');
 });
 

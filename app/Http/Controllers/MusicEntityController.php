@@ -12,6 +12,7 @@ use App\Services\MusicBrainzMatcher;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Str;
 use Illuminate\Validation\Rule;
 use Illuminate\Validation\ValidationException;
 use Inertia\Inertia;
@@ -188,6 +189,22 @@ class MusicEntityController extends Controller
     public function artist(Request $request, string $mbid): Response
     {
         return $this->show($request, $mbid, 'artist');
+    }
+
+    public function lookupArtistName(Request $request, string $mbid, MusicBrainzApi $api): RedirectResponse
+    {
+        abort_unless(Str::isUuid($mbid), 404);
+        $artist = DB::table('music_artists')->where('mbid', $mbid)->first();
+        abort_if($artist === null, 404);
+        abort_unless(Listen::query()->join('listen_artists', 'listen_artists.listen_id', '=', 'listens.id')
+            ->where('listens.user_id', $request->user()->id)->where('listen_artists.music_artist_id', $artist->id)->exists(), 404);
+        if ($artist->name === null) {
+            $name = $api->artistName($mbid);
+            DB::table('music_artists')->where('id', $artist->id)->whereNull('name')
+                ->update(['name' => $name, 'name_source' => 'musicbrainz']);
+        }
+
+        return to_route('artists.show', $mbid);
     }
 
     public function album(Request $request, string $mbid): Response

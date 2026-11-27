@@ -28,7 +28,7 @@ class ManualListenMatcher
         return $value === null ? null : json_decode($value, true, 512, JSON_THROW_ON_ERROR);
     }
 
-    /** @param array{recording_mbid: string, artist_name: string, artist_mbids: list<string>, release_mbid: null} $match */
+    /** @param array{recording_mbid: string, artist_name: string, artist_mbids: list<string>, artist_names?: array<string, string>, release_mbid: null} $match */
     public function remember(User $user, Listen $listen, array $match, ?string $recordingName = null): int
     {
         return DB::transaction(function () use ($user, $listen, $match, $recordingName) {
@@ -36,6 +36,7 @@ class ManualListenMatcher
             if (! Listen::query()->where('user_id', $user->id)->whereKey($listen->id)->whereNull('recording_mbid')->exists()) {
                 throw ValidationException::withMessages(['recording_mbid' => 'This listen has already been identified or deleted.']);
             }
+            $this->matchedMetadata->rememberArtistNames($match['artist_names'] ?? []);
             $key = $this->key($listen->track_name, $listen->artist_name);
             DB::table('listen_matches')->updateOrInsert(
                 ['user_id' => $user->id, 'song_key' => $key],
@@ -50,7 +51,7 @@ class ManualListenMatcher
             $groups = [];
             $catalogGroups = [];
             Listen::query()->where('user_id', $user->id)->whereNull('recording_mbid')
-                ->chunkById(500, function ($listens) use ($key, $match, &$updated, &$groups, &$catalogGroups) {
+                ->chunkById(500, function ($listens) use ($key, $match, $recordingName, &$updated, &$groups, &$catalogGroups) {
                     foreach ($listens as $candidate) {
                         if ($this->key($candidate->track_name, $candidate->artist_name) !== $key) {
                             continue;
@@ -61,7 +62,7 @@ class ManualListenMatcher
                             $metadata['additional_info']['artist_mbids'] = $match['artist_mbids'];
                         }
                         $candidate->update(['recording_mbid' => $match['recording_mbid'], 'track_metadata' => $metadata]);
-                        $this->matchedMetadata->sync($candidate);
+                        $this->matchedMetadata->sync($candidate, $recordingName);
                         $updated++;
                         $catalog = $this->catalogGroups->native($candidate);
                         if ($catalog !== null) {
@@ -80,6 +81,7 @@ class ManualListenMatcher
             foreach ($groups as $candidate) {
                 $updated += $this->catalogGroups->recordMatch($user, $candidate, $match);
             }
+            $updated += $this->catalogGroups->linkMatching($user, $this, [$match['recording_mbid']])['matched'];
 
             return $updated;
         });

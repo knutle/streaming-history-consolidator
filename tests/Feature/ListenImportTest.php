@@ -7,6 +7,7 @@ use App\Models\Listen;
 use App\Models\User;
 use App\Services\ArtistAliases;
 use App\Services\CatalogMatcher;
+use App\Services\CatalogRecordingGroups;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
@@ -357,6 +358,20 @@ class ListenImportTest extends TestCase
             ]),
         ])->assertSessionHasNoErrors();
         $listen = Listen::query()->oldest('id')->firstOrFail();
+        $catalog = app(CatalogMatcher::class)->match('apple', '123', 'Other title', 'Other', 'Album', 180000, 'import');
+        $apple = Listen::query()->create([
+            'user_id' => $user->id, 'source' => 'apple', 'fingerprint' => hash('sha256', 'apple-scan-test'),
+            'listened_at' => 1, 'track_name' => 'Other title', 'artist_name' => 'Other', 'release_name' => 'Album',
+            'played_ms' => 60000, 'recording_mbid' => '22222222-2222-4222-8222-222222222222',
+            'track_metadata' => ['track_name' => 'Other title', 'artist_name' => 'Other', 'additional_info' => ['catalogs' => ['apple' => $catalog]]],
+        ]);
+        foreach (Listen::query()->where('user_id', $user->id)->where('source', 'spotify')->get() as $spotify) {
+            $metadata = $spotify->track_metadata;
+            $metadata['additional_info']['catalogs']['spotify'] = app(CatalogMatcher::class)->match(
+                'spotify', '0123456789ABCDEFGHIJKL', 'Track', 'Alias', 'Album', 180000, 'import',
+            );
+            $spotify->update(['track_metadata' => $metadata]);
+        }
         $otherUser = User::factory()->create();
         $this->actingAs($otherUser)->post(route('listens.import'), [
             'source' => 'spotify', 'file' => $this->spotify([$this->row('2024-01-03T12:00:00Z', artist: 'Alias')]),
@@ -377,7 +392,8 @@ class ListenImportTest extends TestCase
             return true;
         });
         $this->assertDatabaseCount('music_artist_aliases', 3);
-        $this->assertSame(2, Listen::query()->where('recording_mbid', '22222222-2222-4222-8222-222222222222')->count());
+        $this->assertSame(3, Listen::query()->where('recording_mbid', '22222222-2222-4222-8222-222222222222')->count());
+        $this->assertCount(2, app(CatalogRecordingGroups::class)->members($apple));
         $this->assertNull($foreign->fresh()->recording_mbid);
         $this->assertDatabaseHas('artist_recording_scans', ['user_id' => $user->id, 'status' => 'completed', 'matched' => 2]);
         $this->post(route('listens.import'), [
@@ -492,6 +508,39 @@ class ListenImportTest extends TestCase
             'source' => 'spotify', 'file' => $this->spotify([$this->row('2024-01-01T12:00:00Z', artist: 'shared alias')]),
         ])->assertSessionHas('import_result', ['imported' => 1, 'duplicates' => 0, 'matched' => 0]);
         $this->assertNull(Listen::query()->sole()->recording_mbid);
+    }
+
+    public function test_manual_canonical_recording_match_uses_selected_title_to_resolve_artist_name(): void
+    {
+        $this->actingAs(User::factory()->create())->post(route('listens.import'), [
+            'source' => 'spotify', 'file' => $this->spotify([$this->row('2024-01-01T12:00:00Z', track: 'Imported title')]),
+        ])->assertSessionHasNoErrors();
+        $listen = Listen::query()->sole();
+        config(['musicbrainz.enabled' => true, 'musicbrainz.format' => 'canonical', 'database.connections.musicbrainz' => [
+            'driver' => 'sqlite', 'database' => ':memory:', 'prefix' => '', 'foreign_key_constraints' => false,
+        ]]);
+        DB::purge('musicbrainz');
+        Schema::connection('musicbrainz')->create('canonical_recordings', function (Blueprint $table) {
+            $table->string('recording_name');
+            $table->string('recording_mbid');
+            $table->string('artist_credit_name');
+            $table->string('artist_mbids');
+            $table->string('release_name');
+            $table->string('release_mbid');
+        });
+        DB::connection('musicbrainz')->table('canonical_recordings')->insert([
+            'recording_name' => 'Track', 'recording_mbid' => '22222222-2222-4222-8222-222222222222',
+            'artist_credit_name' => 'Verified credit', 'artist_mbids' => '11111111-1111-4111-8111-111111111111',
+            'release_name' => 'Album', 'release_mbid' => '33333333-3333-4333-8333-333333333333',
+        ]);
+
+        $this->post(route('listens.match', $listen->id), [
+            'recording_mbid' => '22222222-2222-4222-8222-222222222222',
+            'track_name' => 'Track', 'artist_name' => 'Verified credit',
+        ])->assertSessionHas('match_result', 1);
+        $this->get(route('artists.show', '11111111-1111-4111-8111-111111111111'))
+            ->assertOk()->assertInertia(fn (Assert $page) => $page
+            ->where('entity.name', 'Verified credit')->where('entity.nameSource', 'canonical_credit'));
     }
 
     public function test_direct_artist_credits_take_precedence_and_aliases_do_not_match_collaborations(): void

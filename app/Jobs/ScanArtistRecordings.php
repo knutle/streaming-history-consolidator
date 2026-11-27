@@ -45,9 +45,12 @@ class ScanArtistRecordings implements ShouldQueue
         $item = Listen::query()->where('user_id', $user->id)->whereKey($scan->listen_id)->firstOrFail();
         $cache = [];
         $manual->related('artist', $item)->whereNull('recording_mbid')->chunkById(200, function ($listens) use ($scan, $user, $item, $manual, $recordingMatches, $aliases, $api, $metadata, $groups, &$cache) {
+            $recordingMbids = [];
+            $running = true;
             foreach ($listens as $listen) {
                 if (! DB::table('artist_recording_scans')->where('id', $scan->id)->where('status', 'running')->exists()) {
-                    return false;
+                    $running = false;
+                    break;
                 }
                 $key = json_encode([$listen->track_name, $listen->release_name], JSON_THROW_ON_ERROR);
                 if (! array_key_exists($key, $cache)) {
@@ -58,7 +61,7 @@ class ScanArtistRecordings implements ShouldQueue
                         ? $api->matchArtistRecording($listen->track_name, $scan->artist_mbid, $album) : null);
                 }
                 $match = $cache[$key];
-                DB::transaction(function () use ($scan, $user, $item, $listen, $match, $manual, $recordingMatches, $metadata, $groups): void {
+                DB::transaction(function () use ($scan, $user, $item, $listen, $match, $manual, $recordingMatches, $metadata, $groups, &$recordingMbids): void {
                     DB::table('users')->where('id', $user->id)->lockForUpdate()->first();
                     if (! DB::table('artist_recording_scans')->where('id', $scan->id)->where('status', 'running')->exists()) {
                         return;
@@ -83,6 +86,7 @@ class ScanArtistRecordings implements ShouldQueue
 
                             return;
                         }
+                        $metadata->rememberArtistNames($match['artist_names'] ?? []);
                         $trackMetadata = $current->track_metadata;
                         $trackMetadata['additional_info']['recording_mbid'] = $match['recording_mbid'];
                         $trackMetadata['additional_info']['artist_mbids'] = $match['artist_mbids'];
@@ -95,12 +99,19 @@ class ScanArtistRecordings implements ShouldQueue
                             'recording_mbid' => $match['recording_mbid'], 'artist_name' => $match['artist_name'],
                             'artist_mbids' => $match['artist_mbids'], 'release_mbid' => null,
                         ]);
+                        $recordingMbids[$match['recording_mbid']] = true;
                     }
                     DB::table('artist_recording_scans')->where('id', $scan->id)->incrementEach([
                         'processed' => 1, 'matched' => $updated,
                     ], ['updated_at' => now()]);
                 });
             }
+            $linked = $groups->linkMatching($user, $recordingMatches, array_keys($recordingMbids));
+            if ($linked['matched'] > 0) {
+                DB::table('artist_recording_scans')->where('id', $scan->id)->increment('matched', $linked['matched'], ['updated_at' => now()]);
+            }
+
+            return $running;
         });
         DB::table('artist_recording_scans')->where('id', $scan->id)->where('status', 'running')
             ->update(['status' => 'completed', 'updated_at' => now()]);

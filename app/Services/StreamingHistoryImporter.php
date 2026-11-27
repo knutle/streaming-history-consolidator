@@ -41,6 +41,7 @@ class StreamingHistoryImporter
             $matches = [];
             $processed = 0;
             $syncCatalogEvidence = false;
+            $recordingMbids = [];
 
             $entries = $this->entries($path, $source, $archive, $checkAbort);
             foreach ($entries as $entry) {
@@ -118,6 +119,9 @@ class StreamingHistoryImporter
                         }
                     }
                     $this->matchedMetadata->sync($existing);
+                    if ($existing->recording_mbid !== null) {
+                        $recordingMbids[$existing->recording_mbid] = true;
+                    }
                     $counts['duplicates']++;
 
                     continue;
@@ -205,9 +209,13 @@ class StreamingHistoryImporter
                 } else {
                     $counts['duplicates']++;
                 }
+                if ($listen->recording_mbid !== null) {
+                    $recordingMbids[$listen->recording_mbid] = true;
+                }
             }
 
-            if ($syncCatalogEvidence) {
+            $linked = $this->catalogGroups->linkMatching($user, $this->manualMatcher, array_keys($recordingMbids), $checkAbort);
+            if ($syncCatalogEvidence && $linked['linked'] === 0) {
                 $this->catalogGroups->syncEvidence($user, $checkAbort);
             }
             if ($progress !== null && $processed > 0) {

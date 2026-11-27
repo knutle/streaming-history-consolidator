@@ -230,6 +230,8 @@ class CatalogRecordingGroups
             if (count($recordings) > 1) {
                 throw ValidationException::withMessages(['merge' => 'These catalog items have different MusicBrainz recordings. Resolve the conflict before linking them.']);
             }
+            DB::table('catalog_recording_auto_exclusions')->where('user_id', $user->id)
+                ->whereIn('catalog_key', [$this->key($first->source, $one['id']), $this->key($second->source, $two['id'])])->delete();
             $groupId = $firstGroup ?? $secondGroup;
             if ($groupId === null) {
                 $groupId = DB::table('catalog_recording_groups')->insertGetId(['user_id' => $user->id, 'created_at' => now(), 'updated_at' => now()]);
@@ -306,6 +308,12 @@ class CatalogRecordingGroups
             DB::table('users')->where('id', $user->id)->lockForUpdate()->first();
             $groupId = $this->groupId($listen);
             abort_if($groupId === null, 404);
+            $member = DB::table('catalog_recording_members')->where('user_id', $user->id)->where('group_id', $groupId)->where('id', $memberId)->first();
+            abort_if($member === null, 404);
+            DB::table('catalog_recording_auto_exclusions')->updateOrInsert(
+                ['user_id' => $user->id, 'catalog_key' => $member->catalog_key],
+                ['updated_at' => now(), 'created_at' => now()],
+            );
             $deleted = DB::table('catalog_recording_members')->where('user_id', $user->id)->where('group_id', $groupId)->where('id', $memberId)->delete();
             abort_if($deleted !== 1, 404);
             if (DB::table('catalog_recording_members')->where('group_id', $groupId)->count() < 2) {
@@ -313,6 +321,192 @@ class CatalogRecordingGroups
             }
             $this->matches = [];
             $this->loaded = [];
+        });
+    }
+
+    /**
+     * @param  list<string>|null  $recordingMbids
+     * @param  (\Closure(): void)|null  $checkAbort
+     * @return array{linked: int, matched: int}
+     */
+    public function linkMatching(User $user, ManualListenMatcher $manual, ?array $recordingMbids = null, ?\Closure $checkAbort = null): array
+    {
+        if ($recordingMbids === []) {
+            return ['linked' => 0, 'matched' => 0];
+        }
+
+        return DB::transaction(function () use ($user, $manual, $recordingMbids, $checkAbort): array {
+            DB::table('users')->where('id', $user->id)->lockForUpdate()->first();
+            $targets = $recordingMbids === null ? null : array_fill_keys($recordingMbids, true);
+            $savedMatches = DB::table('listen_matches')->where('user_id', $user->id)->pluck('match', 'song_key');
+            $excluded = array_fill_keys(DB::table('catalog_recording_auto_exclusions')->where('user_id', $user->id)->pluck('catalog_key')->all(), true);
+            $catalogs = [];
+            $candidates = [];
+            Listen::query()->where('user_id', $user->id)->chunkById(500, function ($listens) use ($manual, $savedMatches, $targets, $checkAbort, &$catalogs, &$candidates): void {
+                if ($checkAbort !== null) {
+                    $checkAbort();
+                }
+                foreach ($listens as $listen) {
+                    $catalog = $this->native($listen);
+                    if ($catalog === null) {
+                        continue;
+                    }
+                    $key = $this->key($listen->source, $catalog['id']);
+                    $catalogs[$key] ??= ['catalog' => $catalog, 'provider' => $listen->source, 'recordings' => []];
+                    if ($listen->recording_mbid !== null) {
+                        $catalogs[$key]['recordings'][$listen->recording_mbid] = true;
+                        if ($targets === null || isset($targets[$listen->recording_mbid])) {
+                            $candidates[$listen->recording_mbid][$key] = [
+                                'recording_mbid' => $listen->recording_mbid,
+                                'artist_name' => $listen->artist_name,
+                                'artist_mbids' => $listen->track_metadata['additional_info']['artist_mbids'] ?? [],
+                                'release_mbid' => null,
+                            ];
+                        }
+                    }
+                    $saved = $savedMatches[$manual->key($listen->track_name, $listen->artist_name)] ?? null;
+                    if ($saved !== null) {
+                        $match = json_decode($saved, true, 512, JSON_THROW_ON_ERROR);
+                        $catalogs[$key]['recordings'][$match['recording_mbid']] = true;
+                    }
+                }
+            });
+
+            $members = [];
+            $groupMembers = [];
+            foreach (DB::table('catalog_recording_members')->where('user_id', $user->id)->get() as $member) {
+                $members[$member->catalog_key] = $member->group_id;
+                $groupMembers[$member->group_id][$member->catalog_key] = true;
+            }
+            $groupMatches = [];
+            foreach (DB::table('catalog_recording_groups')->where('user_id', $user->id)->whereNotNull('recording_match')->get() as $group) {
+                $groupMatches[$group->id] = json_decode($group->recording_match, true, 512, JSON_THROW_ON_ERROR);
+            }
+
+            $linked = 0;
+            $changedGroups = [];
+            foreach ($candidates as $mbid => $items) {
+                if ($checkAbort !== null) {
+                    $checkAbort();
+                }
+                $units = [];
+                $providers = [];
+                foreach ($items as $key => $match) {
+                    $groupId = $members[$key] ?? null;
+                    $keys = $groupId === null ? [$key => true] : $groupMembers[$groupId];
+                    $valid = $groupId === null || ! isset($groupMatches[$groupId]) || $groupMatches[$groupId]['recording_mbid'] === $mbid;
+                    foreach ($keys as $memberKey => $_) {
+                        if (isset($excluded[$memberKey]) || ! isset($catalogs[$memberKey])
+                            || array_diff(array_keys($catalogs[$memberKey]['recordings']), [$mbid]) !== []) {
+                            $valid = false;
+                            break;
+                        }
+                    }
+                    if (! $valid) {
+                        continue;
+                    }
+                    $unit = $groupId === null ? $key : 'group:'.$groupId;
+                    $units[$unit] = ['group' => $groupId, 'key' => $key, 'match' => $match];
+                    foreach ($keys as $memberKey => $_) {
+                        $providers[$catalogs[$memberKey]['provider']] = true;
+                    }
+                }
+                if (count($providers) < 2 || $units === []) {
+                    continue;
+                }
+                if (count($units) === 1) {
+                    $only = reset($units);
+                    if ($only['group'] === null || isset($groupMatches[$only['group']])) {
+                        continue;
+                    }
+                }
+                $groupId = null;
+                foreach ($units as $unit) {
+                    if ($unit['group'] !== null) {
+                        $groupId = $unit['group'];
+                        break;
+                    }
+                }
+                $match = $groupId !== null && isset($groupMatches[$groupId]) ? $groupMatches[$groupId] : reset($units)['match'];
+                foreach ($units as $unit) {
+                    $candidate = $unit['group'] !== null && isset($groupMatches[$unit['group']]) ? $groupMatches[$unit['group']] : $unit['match'];
+                    if (count($candidate['artist_mbids']) > count($match['artist_mbids'])) {
+                        $match = $candidate;
+                    }
+                }
+                if ($groupId === null) {
+                    $groupId = DB::table('catalog_recording_groups')->insertGetId([
+                        'user_id' => $user->id, 'recording_match' => json_encode($match, JSON_THROW_ON_ERROR),
+                        'created_at' => now(), 'updated_at' => now(),
+                    ]);
+                    $groupMembers[$groupId] = [];
+                } elseif (! isset($groupMatches[$groupId]) || count($match['artist_mbids']) > count($groupMatches[$groupId]['artist_mbids'])) {
+                    DB::table('catalog_recording_groups')->where('user_id', $user->id)->where('id', $groupId)
+                        ->update(['recording_match' => json_encode($match, JSON_THROW_ON_ERROR), 'updated_at' => now()]);
+                    $linked++;
+                }
+                $groupMatches[$groupId] = $match;
+                $changedGroups[$groupId] = true;
+                foreach ($units as $unit) {
+                    $oldGroup = $unit['group'];
+                    if ($oldGroup === $groupId) {
+                        continue;
+                    }
+                    if ($oldGroup !== null) {
+                        DB::table('catalog_recording_members')->where('user_id', $user->id)->where('group_id', $oldGroup)->update(['group_id' => $groupId]);
+                        DB::table('catalog_recording_groups')->where('user_id', $user->id)->where('id', $oldGroup)->delete();
+                        foreach ($groupMembers[$oldGroup] as $memberKey => $_) {
+                            $members[$memberKey] = $groupId;
+                            $groupMembers[$groupId][$memberKey] = true;
+                        }
+                        unset($groupMembers[$oldGroup], $groupMatches[$oldGroup]);
+                    } else {
+                        $key = $unit['key'];
+                        $catalog = $this->catalogs->withMetadata($user->id, $catalogs[$key]['catalog']);
+                        DB::table('catalog_recording_members')->insert([
+                            'user_id' => $user->id, 'group_id' => $groupId, 'catalog_key' => $key,
+                            'catalog' => json_encode($catalog, JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE),
+                            'created_at' => now(), 'updated_at' => now(),
+                        ]);
+                        $members[$key] = $groupId;
+                        $groupMembers[$groupId][$key] = true;
+                    }
+                    $linked++;
+                }
+            }
+            $matched = 0;
+            if ($linked > 0) {
+                Listen::query()->where('user_id', $user->id)->whereNull('recording_mbid')
+                    ->chunkById(500, function ($listens) use ($members, $changedGroups, $groupMatches, $checkAbort, &$matched): void {
+                        if ($checkAbort !== null) {
+                            $checkAbort();
+                        }
+                        foreach ($listens as $listen) {
+                            $catalog = $this->native($listen);
+                            if ($catalog === null) {
+                                continue;
+                            }
+                            $groupId = $members[$this->key($listen->source, $catalog['id'])] ?? null;
+                            if ($groupId === null || ! isset($changedGroups[$groupId])) {
+                                continue;
+                            }
+                            $match = $groupMatches[$groupId];
+                            $metadata = $listen->track_metadata;
+                            $metadata['additional_info']['recording_mbid'] = $match['recording_mbid'];
+                            if ($match['artist_mbids'] !== []) {
+                                $metadata['additional_info']['artist_mbids'] = $match['artist_mbids'];
+                            }
+                            $listen->update(['recording_mbid' => $match['recording_mbid'], 'track_metadata' => $metadata]);
+                            $this->metadata->sync($listen);
+                            $matched++;
+                        }
+                    });
+                $this->matches = [];
+                $this->loaded = [];
+                $this->syncEvidence($user, $checkAbort);
+            }
+
+            return ['linked' => $linked, 'matched' => $matched];
         });
     }
 }

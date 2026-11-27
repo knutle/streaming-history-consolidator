@@ -18,7 +18,19 @@ class MatchedMusicMetadata
 
     public function __construct(private MusicBrainzMatcher $matcher, private ManualMusicEntityMatcher $manualEntities) {}
 
-    public function sync(Listen $listen): void
+    /** @param array<string, string> $names */
+    public function rememberArtistNames(array $names): void
+    {
+        foreach ($names as $mbid => $name) {
+            DB::table('music_artists')->upsert(
+                [['mbid' => $mbid, 'name' => $name, 'name_source' => 'musicbrainz']],
+                ['mbid'],
+                ['name', 'name_source'],
+            );
+        }
+    }
+
+    public function sync(Listen $listen, ?string $recordingName = null): void
     {
         if ($listen->recording_mbid === null) {
             $this->manualEntities->apply($listen);
@@ -47,9 +59,10 @@ class MatchedMusicMetadata
             }
             $mbids[] = $value;
         }
-        $artistKey = json_encode([$mbids, $listen->recording_mbid, $listen->track_name], JSON_THROW_ON_ERROR);
+        $track = $recordingName ?? $listen->track_name;
+        $artistKey = json_encode([$mbids, $listen->recording_mbid, $track], JSON_THROW_ON_ERROR);
         if (! array_key_exists($artistKey, $this->artists)) {
-            $this->artists[$artistKey] = $this->matcher->artistNames($mbids, $listen->recording_mbid, $listen->track_name);
+            $this->artists[$artistKey] = $this->matcher->artistNames($mbids, $listen->recording_mbid, $track);
         }
         foreach ($mbids as $mbid) {
             $artist = $this->artists[$artistKey][$mbid] ?? null;

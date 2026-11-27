@@ -5,6 +5,7 @@ namespace Tests\Feature;
 use App\Models\Listen;
 use App\Models\User;
 use App\Services\CatalogMatcher;
+use App\Services\CatalogRecordingGroups;
 use App\Services\ManualListenMatcher;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
@@ -286,5 +287,167 @@ class CatalogRecordingGroupsTest extends TestCase
             'file' => UploadedFile::fake()->createWithContent('history.json', json_encode([$row], JSON_THROW_ON_ERROR))])
             ->assertSessionHasErrors('file');
         $this->assertDatabaseCount('listens', 2);
+    }
+
+    public function test_backfill_links_matching_catalogs_once_and_preserves_distinct_plays_and_users(): void
+    {
+        $user = User::factory()->create();
+        $other = User::factory()->create();
+        $mbid = '11111111-1111-4111-8111-111111111111';
+        $apple = $this->listen($user, 'apple', '123', 'Apple title', 1, $mbid);
+        $spotify = $this->listen($user, 'spotify', '0123456789ABCDEFGHIJKL', 'Spotify title', 2, $mbid);
+        $this->listen($user, 'spotify', '0123456789ABCDEFGHIJKL', 'Spotify title', 3, $mbid);
+        $unmatched = $this->listen($user, 'spotify', '0123456789ABCDEFGHIJKL', 'Unmatched play', 7);
+        $otherSpotify = $this->listen($user, 'spotify', 'ABCDEFGHIJKLMNOPQRSTUV', 'Another title', 4, $mbid);
+        $this->listen($user, 'apple', '456', 'Different', 5, '22222222-2222-4222-8222-222222222222');
+        $foreign = $this->listen($other, 'apple', '789', 'Foreign', 6, $mbid);
+
+        $this->artisan('catalogs:link-matched', ['--user' => (string) $user->id])->assertSuccessful();
+        $this->artisan('catalogs:link-matched', ['--user' => (string) $user->id])->assertSuccessful();
+        $groups = app(CatalogRecordingGroups::class);
+        $this->assertSame($groups->groupId($apple), $groups->groupId($spotify));
+        $this->assertSame($groups->groupId($apple), $groups->groupId($otherSpotify));
+        $this->assertNull($groups->groupId($foreign));
+        $this->assertCount(3, $groups->members($apple));
+        $this->assertSame($mbid, $unmatched->fresh()->recording_mbid);
+        $this->assertDatabaseCount('listens', 7);
+        $this->assertDatabaseCount('catalog_recording_groups', 1);
+    }
+
+    public function test_backfill_does_not_link_same_provider_or_conflicting_catalog_and_saved_matches(): void
+    {
+        $user = User::factory()->create();
+        $mbid = '11111111-1111-4111-8111-111111111111';
+        $otherMbid = '22222222-2222-4222-8222-222222222222';
+        $apple = $this->listen($user, 'apple', '123', 'Apple', 1, $mbid);
+        $conflict = $this->listen($user, 'spotify', '0123456789ABCDEFGHIJKL', 'Spotify', 2, $mbid);
+        $this->listen($user, 'spotify', '0123456789ABCDEFGHIJKL', 'Another play', 3, $otherMbid);
+        $saved = $this->listen($user, 'spotify', 'ABCDEFGHIJKLMNOPQRSTUV', 'Saved conflict', 4, $mbid);
+        DB::table('listen_matches')->insert([
+            'user_id' => $user->id, 'song_key' => app(ManualListenMatcher::class)->key('Saved conflict', 'Artist'),
+            'match' => json_encode(['recording_mbid' => $otherMbid, 'artist_name' => 'Artist', 'artist_mbids' => [], 'release_mbid' => null], JSON_THROW_ON_ERROR),
+            'created_at' => now(), 'updated_at' => now(),
+        ]);
+        $this->listen($user, 'apple', '456', 'Same provider', 5, $mbid);
+
+        $this->artisan('catalogs:link-matched', ['--user' => (string) $user->id])->assertSuccessful();
+        $groups = app(CatalogRecordingGroups::class);
+        $this->assertNull($groups->groupId($apple));
+        $this->assertNull($groups->groupId($conflict));
+        $this->assertNull($groups->groupId($saved));
+        $this->assertDatabaseCount('catalog_recording_groups', 0);
+    }
+
+    public function test_unlinked_member_stays_excluded_until_it_is_manually_linked_again(): void
+    {
+        $user = User::factory()->create();
+        $mbid = '11111111-1111-4111-8111-111111111111';
+        $apple = $this->listen($user, 'apple', '123', 'Apple', 1, $mbid);
+        $spotify = $this->listen($user, 'spotify', '0123456789ABCDEFGHIJKL', 'Spotify', 2, $mbid);
+        $this->artisan('catalogs:link-matched', ['--user' => (string) $user->id])->assertSuccessful();
+        $member = DB::table('catalog_recording_members')->where('catalog_key', hash('sha256', 'spotify:0123456789ABCDEFGHIJKL'))->value('id');
+        $this->actingAs($user)->delete(route('listens.unlink', ['listen' => $apple->id, 'member' => $member]))->assertSessionHasNoErrors();
+        $this->artisan('catalogs:link-matched', ['--user' => (string) $user->id])->assertSuccessful();
+        $this->assertDatabaseCount('catalog_recording_groups', 0);
+
+        $this->post(route('listens.merge', $apple->id), ['other_listen' => $spotify->id])->assertSessionHasNoErrors();
+        $this->assertDatabaseCount('catalog_recording_auto_exclusions', 0);
+        $this->assertCount(2, app(CatalogRecordingGroups::class)->members($apple));
+    }
+
+    public function test_backfill_combines_existing_compatible_groups_but_leaves_conflicting_groups_intact(): void
+    {
+        $user = User::factory()->create();
+        $mbid = '11111111-1111-4111-8111-111111111111';
+        $otherMbid = '22222222-2222-4222-8222-222222222222';
+        $apple = $this->listen($user, 'apple', '123', 'One', 1);
+        $spotify = $this->listen($user, 'spotify', '0123456789ABCDEFGHIJKL', 'Two', 2);
+        $apple2 = $this->listen($user, 'apple', '456', 'Three', 3);
+        $spotify2 = $this->listen($user, 'spotify', 'ABCDEFGHIJKLMNOPQRSTUV', 'Four', 4);
+        $apple3 = $this->listen($user, 'apple', '789', 'Five', 5);
+        $spotify3 = $this->listen($user, 'spotify', 'ZYXWVUTSRQPONMLKJIHGFE', 'Six', 6);
+        $this->actingAs($user)->post(route('listens.merge', $apple->id), ['other_listen' => $spotify->id])->assertSessionHasNoErrors();
+        $this->post(route('listens.merge', $apple2->id), ['other_listen' => $spotify2->id])->assertSessionHasNoErrors();
+        $this->post(route('listens.merge', $apple3->id), ['other_listen' => $spotify3->id])->assertSessionHasNoErrors();
+        foreach ([$apple, $spotify, $apple2, $spotify2, $apple3] as $listen) {
+            $listen->update(['recording_mbid' => $mbid]);
+        }
+        $spotify3->update(['recording_mbid' => $otherMbid]);
+
+        $this->artisan('catalogs:link-matched', ['--user' => (string) $user->id])->assertSuccessful();
+        $groups = app(CatalogRecordingGroups::class);
+        $this->assertCount(4, $groups->members($apple));
+        $this->assertSame($groups->groupId($apple), $groups->groupId($spotify2));
+        $this->assertNotSame($groups->groupId($apple), $groups->groupId($apple3));
+        $this->assertCount(2, $groups->members($apple3));
+    }
+
+    public function test_backfill_propagates_a_match_in_an_existing_unmatched_group(): void
+    {
+        $user = User::factory()->create();
+        $apple = $this->listen($user, 'apple', '123', 'One', 1);
+        $spotify = $this->listen($user, 'spotify', '0123456789ABCDEFGHIJKL', 'Two', 2);
+        $this->actingAs($user)->post(route('listens.merge', $apple->id), ['other_listen' => $spotify->id])->assertSessionHasNoErrors();
+        $mbid = '11111111-1111-4111-8111-111111111111';
+        $apple->update(['recording_mbid' => $mbid]);
+
+        $this->artisan('catalogs:link-matched', ['--user' => (string) $user->id])->assertSuccessful();
+        $this->assertSame($mbid, $spotify->fresh()->recording_mbid);
+        $this->assertSame($mbid, app(CatalogRecordingGroups::class)->remembered($user->id, 'spotify', '0123456789ABCDEFGHIJKL')['recording_mbid']);
+    }
+
+    public function test_manual_recording_selection_automatically_links_already_identified_catalog_item(): void
+    {
+        $user = User::factory()->create();
+        $mbid = '11111111-1111-4111-8111-111111111111';
+        $apple = $this->listen($user, 'apple', '123', 'Apple', 1, $mbid);
+        $spotify = $this->listen($user, 'spotify', '0123456789ABCDEFGHIJKL', 'Spotify', 2);
+        app(ManualListenMatcher::class)->remember($user, $spotify, [
+            'recording_mbid' => $mbid, 'artist_name' => 'Artist', 'artist_mbids' => [], 'release_mbid' => null,
+        ]);
+
+        $this->assertSame($mbid, $spotify->fresh()->recording_mbid);
+        $this->assertCount(2, app(CatalogRecordingGroups::class)->members($apple));
+    }
+
+    public function test_matching_import_and_reimport_link_catalogs_without_extra_listens(): void
+    {
+        Http::preventStrayRequests();
+        $user = User::factory()->create();
+        $mbid = '11111111-1111-4111-8111-111111111111';
+        $apple = $this->listen($user, 'apple', '123', 'Apple', 1, $mbid);
+        DB::table('listen_matches')->insert([
+            'user_id' => $user->id, 'song_key' => app(ManualListenMatcher::class)->key('Spotify', 'Artist'),
+            'match' => json_encode(['recording_mbid' => $mbid, 'artist_name' => 'Artist', 'artist_mbids' => [], 'release_mbid' => null], JSON_THROW_ON_ERROR),
+            'created_at' => now(), 'updated_at' => now(),
+        ]);
+        $row = ['ts' => '2024-01-01T12:00:00Z', 'ms_played' => 60000,
+            'master_metadata_track_name' => 'Spotify', 'master_metadata_album_artist_name' => 'Artist',
+            'master_metadata_album_album_name' => 'Album', 'spotify_track_uri' => 'spotify:track:0123456789ABCDEFGHIJKL'];
+        $import = fn () => $this->actingAs($user)->post(route('listens.import'), ['source' => 'spotify',
+            'file' => UploadedFile::fake()->createWithContent('history.json', json_encode([$row], JSON_THROW_ON_ERROR))]);
+        $import()->assertSessionHas('import_result', ['imported' => 1, 'duplicates' => 0, 'matched' => 1]);
+        $import()->assertSessionHas('import_result', ['imported' => 0, 'duplicates' => 1, 'matched' => 0]);
+        $this->assertCount(2, app(CatalogRecordingGroups::class)->members($apple));
+        $this->assertDatabaseCount('listens', 2);
+        $member = DB::table('catalog_recording_members')->where('catalog_key', hash('sha256', 'spotify:0123456789ABCDEFGHIJKL'))->value('id');
+        $this->delete(route('listens.unlink', ['listen' => $apple->id, 'member' => $member]))->assertSessionHasNoErrors();
+        $import()->assertSessionHas('import_result', ['imported' => 0, 'duplicates' => 1, 'matched' => 0]);
+        $this->assertDatabaseCount('catalog_recording_groups', 0);
+        Http::assertNothingSent();
+    }
+
+    public function test_backfill_skips_users_with_active_imports(): void
+    {
+        $user = User::factory()->create();
+        $mbid = '11111111-1111-4111-8111-111111111111';
+        $this->listen($user, 'apple', '123', 'Apple', 1, $mbid);
+        $this->listen($user, 'spotify', '0123456789ABCDEFGHIJKL', 'Spotify', 2, $mbid);
+        DB::table('import_runs')->insert([
+            'id' => '11111111-1111-4111-8111-111111111111', 'user_id' => $user->id,
+            'status' => 'running', 'files' => '[]', 'created_at' => now(), 'updated_at' => now(),
+        ]);
+        $this->artisan('catalogs:link-matched', ['--user' => (string) $user->id])->assertFailed();
+        $this->assertDatabaseCount('catalog_recording_groups', 0);
     }
 }

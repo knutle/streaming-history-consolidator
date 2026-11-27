@@ -95,7 +95,7 @@ class MusicBrainzApi
         return array_values($releases);
     }
 
-    /** @return array{recording_mbid: string, artist_name: string, artist_mbids: list<string>, release_mbid: null} */
+    /** @return array{recording_mbid: string, artist_name: string, artist_mbids: list<string>, artist_names: array<string, string>, release_mbid: null} */
     public function recording(string $id, string $title, string $artist): array
     {
         $data = $this->get('recording/'.$id, ['inc' => 'artist-credits', 'fmt' => 'json'], 'recording_mbid');
@@ -105,10 +105,10 @@ class MusicBrainzApi
         }
 
         return ['recording_mbid' => $id, 'artist_name' => $match['artist_name'],
-            'artist_mbids' => $match['artist_mbids'], 'release_mbid' => null];
+            'artist_mbids' => $match['artist_mbids'], 'artist_names' => $match['artist_names'], 'release_mbid' => null];
     }
 
-    /** @return array{recording_mbid: string, artist_name: string, artist_mbids: list<string>, release_mbid: null}|null */
+    /** @return array{recording_mbid: string, artist_name: string, artist_mbids: list<string>, artist_names: array<string, string>, release_mbid: null}|null */
     public function matchArtistRecording(string $title, string $artistMbid, string $album): ?array
     {
         $query = 'recording:"'.$this->escape(trim($title)).'" AND arid:'.$artistMbid;
@@ -150,7 +150,18 @@ class MusicBrainzApi
         $match = reset($matches);
 
         return ['recording_mbid' => $match['recording_mbid'], 'artist_name' => $match['artist_name'],
-            'artist_mbids' => $match['artist_mbids'], 'release_mbid' => null];
+            'artist_mbids' => $match['artist_mbids'], 'artist_names' => $match['artist_names'], 'release_mbid' => null];
+    }
+
+    public function artistName(string $id): string
+    {
+        $data = $this->get('artist/'.$id, ['fmt' => 'json'], 'artist_name');
+        $artist = $this->parseEntity('artist', $data, 'artist_name');
+        if ($artist['mbid'] !== $id) {
+            $this->fail('artist_name', 'MusicBrainz returned a different artist.');
+        }
+
+        return $artist['name'];
     }
 
     /** @return array{results: list<array{mbid: string, name: string, context: ?string}>, hasMore: bool} */
@@ -292,7 +303,7 @@ class MusicBrainzApi
         return $data;
     }
 
-    /** @return array{recording_mbid: string, track_name: string, artist_name: string, artist_mbids: list<string>} */
+    /** @return array{recording_mbid: string, track_name: string, artist_name: string, artist_mbids: list<string>, artist_names: array<string, string>} */
     private function parseRecording(mixed $data, string $errorKey): array
     {
         if (! is_array($data) || ! is_string($data['id'] ?? null) || ! Str::isUuid($data['id'])
@@ -302,6 +313,7 @@ class MusicBrainzApi
         }
         $artist = '';
         $ids = [];
+        $names = [];
         foreach ($data['artist-credit'] as $credit) {
             $name = is_array($credit) ? ($credit['name'] ?? $credit['artist']['name'] ?? null) : null;
             if (! is_array($credit) || ! is_string($name) || trim($name) === ''
@@ -311,12 +323,21 @@ class MusicBrainzApi
             }
             $artist .= $name.($credit['joinphrase'] ?? '');
             $ids[] = $credit['artist']['id'];
+            if (isset($credit['artist']['name'])) {
+                $canonicalName = $credit['artist']['name'];
+                if (! is_string($canonicalName) || trim($canonicalName) === '' || mb_strlen($canonicalName) > 255
+                    || (isset($names[$credit['artist']['id']]) && $names[$credit['artist']['id']] !== $canonicalName)) {
+                    $this->fail($errorKey, 'MusicBrainz returned invalid artist credit metadata.');
+                }
+                $names[$credit['artist']['id']] = $canonicalName;
+            }
         }
         if (mb_strlen($artist) > 255) {
             $this->fail($errorKey, 'MusicBrainz returned an artist credit that is too long.');
         }
 
-        return ['recording_mbid' => $data['id'], 'track_name' => $data['title'], 'artist_name' => $artist, 'artist_mbids' => $ids];
+        return ['recording_mbid' => $data['id'], 'track_name' => $data['title'], 'artist_name' => $artist,
+            'artist_mbids' => $ids, 'artist_names' => $names];
     }
 
     private function fail(string $key, string $message): never
