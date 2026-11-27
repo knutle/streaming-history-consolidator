@@ -1,6 +1,7 @@
 import { Link, usePage } from '@inertiajs/react';
 import {
     BookOpen,
+    ChevronDown,
     Disc3,
     FileUp,
     Folder,
@@ -17,6 +18,7 @@ import { Button } from '@/components/ui/button';
 import {
     DropdownMenu,
     DropdownMenuContent,
+    DropdownMenuItem,
     DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import {
@@ -53,7 +55,7 @@ type Props = {
     breadcrumbs?: BreadcrumbItem[];
 };
 
-const mainNavItems: NavItem[] = [
+const primaryNavItems: NavItem[] = [
     {
         title: 'Dashboard',
         href: dashboard(),
@@ -74,6 +76,9 @@ const mainNavItems: NavItem[] = [
         href: albumsIndex(),
         icon: Disc3,
     },
+];
+
+const overflowNavItems: NavItem[] = [
     {
         title: 'Imports',
         href: importsIndex(),
@@ -85,6 +90,8 @@ const mainNavItems: NavItem[] = [
         icon: Link2,
     },
 ];
+
+const mainNavItems: NavItem[] = [...primaryNavItems, ...overflowNavItems];
 
 const rightNavItems: NavItem[] = [
     {
@@ -108,12 +115,15 @@ export function AppHeader({ breadcrumbs = [] }: Props) {
     const { auth } = page.props;
     const getInitials = useInitials();
     const { isCurrentUrl, whenCurrentUrl } = useCurrentUrl();
+    const isOverflowActive = overflowNavItems.some((item) =>
+        isCurrentUrl(item.href),
+    );
 
     return (
         <>
             <header className="border-b bg-background">
                 <div className="mx-auto flex min-h-16 w-full max-w-6xl items-center gap-3 px-5 py-4 sm:px-8">
-                    <div className="xl:hidden">
+                    <div className="lg:hidden">
                         <Sheet>
                             <SheetTrigger asChild>
                                 <Button
@@ -209,11 +219,11 @@ export function AppHeader({ breadcrumbs = [] }: Props) {
 
                     <nav
                         aria-label="Primary navigation"
-                        className="hidden min-w-0 flex-1 justify-center xl:flex"
+                        className="hidden min-w-0 flex-1 justify-center lg:flex"
                     >
                         <NavigationMenu className="flex max-w-full items-center">
                             <NavigationMenuList className="flex flex-wrap items-center justify-center gap-1">
-                                {mainNavItems.map((item) => (
+                                {primaryNavItems.map((item) => (
                                     <NavigationMenuItem
                                         key={item.title}
                                         className="relative flex items-center"
@@ -244,6 +254,55 @@ export function AppHeader({ breadcrumbs = [] }: Props) {
                                         )}
                                     </NavigationMenuItem>
                                 ))}
+                                <NavigationMenuItem className="relative flex items-center">
+                                    <DropdownMenu>
+                                        <DropdownMenuTrigger
+                                            className={cn(
+                                                navigationMenuTriggerStyle(),
+                                                isOverflowActive &&
+                                                    activeItemStyles,
+                                                'h-9 cursor-pointer px-2.5 text-sm',
+                                            )}
+                                        >
+                                            More
+                                            <ChevronDown className="ml-1 size-4" />
+                                        </DropdownMenuTrigger>
+                                        <DropdownMenuContent align="start">
+                                            {overflowNavItems.map((item) => (
+                                                <DropdownMenuItem
+                                                    key={item.title}
+                                                    asChild
+                                                >
+                                                    <Link
+                                                        href={item.href}
+                                                        aria-current={
+                                                            isCurrentUrl(
+                                                                item.href,
+                                                            )
+                                                                ? 'page'
+                                                                : undefined
+                                                        }
+                                                        className={cn(
+                                                            'flex items-center gap-2',
+                                                            isCurrentUrl(
+                                                                item.href,
+                                                            ) &&
+                                                                mobileActiveItemStyles,
+                                                        )}
+                                                    >
+                                                        {item.icon && (
+                                                            <item.icon className="size-4" />
+                                                        )}
+                                                        {item.title}
+                                                    </Link>
+                                                </DropdownMenuItem>
+                                            ))}
+                                        </DropdownMenuContent>
+                                    </DropdownMenu>
+                                    {isOverflowActive && (
+                                        <div className="absolute inset-x-2 bottom-0 h-0.5 rounded-full bg-emerald-700 dark:bg-emerald-400" />
+                                    )}
+                                </NavigationMenuItem>
                             </NavigationMenuList>
                         </NavigationMenu>
                     </nav>
