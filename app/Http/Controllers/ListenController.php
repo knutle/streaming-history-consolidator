@@ -7,13 +7,13 @@ use App\Models\Listen;
 use App\Services\CatalogMatcher;
 use App\Services\CatalogRecordingGroups;
 use App\Services\Isrc;
+use App\Services\ListenFilters;
 use App\Services\ManualListenMatcher;
 use App\Services\MusicBrainzApi;
 use App\Services\MusicBrainzMatcher;
 use App\Services\SpotifyCatalogLookup;
 use App\Services\StreamingHistoryImporter;
 use App\Services\StreamingHistoryUpload;
-use Carbon\CarbonImmutable;
 use Illuminate\Contracts\Auth\MustVerifyEmail;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
@@ -38,44 +38,12 @@ class ListenController extends Controller
         ]);
     }
 
-    public function index(Request $request): Response
+    public function index(Request $request, ListenFilters $listenFilters): Response
     {
-        $filters = $request->validate([
-            'search' => ['nullable', 'string', 'max:255'],
-            'source' => ['nullable', Rule::in(['spotify', 'apple'])],
-            'match' => ['nullable', Rule::in(['matched', 'unmatched'])],
-            'from' => ['nullable', 'date_format:Y-m-d'],
-            'to' => ['nullable', 'date_format:Y-m-d', 'after_or_equal:from'],
-            'sort' => ['nullable', Rule::in(['listened_at', 'track_name', 'artist_name', 'release_name'])],
-            'direction' => ['nullable', Rule::in(['asc', 'desc'])],
-        ]);
+        $filters = $listenFilters->validate($request);
+        $query = $listenFilters->query($request->user()->id, $filters);
 
-        $query = Listen::query()->where('user_id', $request->user()->id);
-        if (! empty($filters['search'])) {
-            $search = mb_strtolower($filters['search']);
-            $pattern = '%'.str_replace(['!', '%', '_'], ['!!', '!%', '!_'], $search).'%';
-            $query->where(function ($query) use ($pattern) {
-                $query->whereRaw("LOWER(track_name) LIKE ? ESCAPE '!'", [$pattern])
-                    ->orWhereRaw("LOWER(artist_name) LIKE ? ESCAPE '!'", [$pattern])
-                    ->orWhereRaw("LOWER(release_name) LIKE ? ESCAPE '!'", [$pattern]);
-            });
-        }
-        if (! empty($filters['source'])) {
-            $query->where('source', $filters['source']);
-        }
-        if (($filters['match'] ?? null) === 'matched') {
-            $query->whereNotNull('recording_mbid');
-        } elseif (($filters['match'] ?? null) === 'unmatched') {
-            $query->whereNull('recording_mbid');
-        }
-        if (! empty($filters['from'])) {
-            $query->where('listened_at', '>=', CarbonImmutable::parse($filters['from'], 'UTC')->startOfDay()->getTimestamp());
-        }
-        if (! empty($filters['to'])) {
-            $query->where('listened_at', '<', CarbonImmutable::parse($filters['to'], 'UTC')->addDay()->startOfDay()->getTimestamp());
-        }
-
-        $listens = $query->orderBy($filters['sort'] ?? 'listened_at', $filters['direction'] ?? 'desc')
+        $listens = $query->orderBy($filters['sort'] ?? 'listened_at', ($filters['direction'] ?? null) === 'asc' ? 'asc' : 'desc')
             ->orderBy('id', 'desc')
             ->paginate(25)
             ->withQueryString();
@@ -88,10 +56,33 @@ class ListenController extends Controller
             $listen->setAttribute('matched_artist_mbids', $artists->get($listen->id, collect())->pluck('mbid')->all());
             $listen->setAttribute('matched_album_mbids', $albums->get($listen->id, collect())->pluck('mbid')->all());
         });
+        $selection = DB::table('bulk_musicbrainz_selections')->where('user_id', $request->user()->id)->first();
+        $selectionNeedsClear = $selection !== null && $selection->filter_hash !== $listenFilters->selectionHash($filters);
+        if ($selectionNeedsClear) {
+            $selection = null;
+        }
+        $selectedIds = [];
+        $selectedCount = 0;
+        if ($selection !== null) {
+            $items = DB::table('bulk_musicbrainz_selection_items')->where('user_id', $request->user()->id)->select('listen_id');
+            $selected = $listenFilters->query($request->user()->id, $filters)->whereNull('recording_mbid');
+            if ($selection->all_selected) {
+                $selected->whereNotIn('id', $items);
+            } else {
+                $selected->whereIn('id', $items);
+            }
+            $selectedCount = (clone $selected)->count();
+            $selectedIds = (clone $selected)->whereKey($ids)->pluck('id')->all();
+        }
 
         return Inertia::render('listens/index', [
             'listens' => $listens,
             'filters' => $filters,
+            'bulkSelection' => ['ids' => $selectedIds, 'count' => $selectedCount, 'all' => (bool) ($selection->all_selected ?? false),
+                'needsClear' => $selectionNeedsClear],
+            'bulkRun' => DB::table('bulk_musicbrainz_runs')->where('user_id', $request->user()->id)
+                ->orderByDesc('id')->first(['id', 'status', 'total', 'processed', 'matched', 'unmatched', 'skipped', 'propagated', 'error', 'retry_at']),
+            'pendingMusicBrainzCount' => DB::table('pending_musicbrainz_matches')->where('user_id', $request->user()->id)->count(),
         ]);
     }
 

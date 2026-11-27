@@ -1,4 +1,5 @@
-import { Head, Link, usePage } from '@inertiajs/react';
+import { Head, Link, router, usePage, usePoll } from '@inertiajs/react';
+import { useEffect, useState } from 'react';
 import Form from '@/components/form';
 import InputError from '@/components/input-error';
 import { Button } from '@/components/ui/button';
@@ -7,6 +8,13 @@ import { Label } from '@/components/ui/label';
 import { show as albumShow } from '@/routes/albums';
 import { show as artistShow } from '@/routes/artists';
 import { index, show } from '@/routes/listens';
+import {
+    cancel as cancelBulk,
+    resume as resumeBulk,
+    review as reviewBulk,
+    selection as updateSelection,
+    store as startBulk,
+} from '@/routes/listens/bulk-musicbrainz';
 import { manage as manageEntity } from '@/routes/music-entities';
 import { index as importsIndex } from '@/routes/imports';
 
@@ -38,13 +46,94 @@ type Props = {
         sort?: string;
         direction?: string;
     };
+    bulkSelection: {
+        ids: number[];
+        count: number;
+        all: boolean;
+        needsClear: boolean;
+    };
+    pendingMusicBrainzCount: number;
+    bulkRun: {
+        id: number;
+        status:
+            | 'queued'
+            | 'running'
+            | 'waiting'
+            | 'paused'
+            | 'completed'
+            | 'cancelled'
+            | 'failed';
+        total: number;
+        processed: number;
+        matched: number;
+        unmatched: number;
+        skipped: number;
+        propagated: number;
+        error: string | null;
+        retry_at: string | null;
+    } | null;
 };
 
 const selectClass =
     'h-9 w-full rounded-md border border-input bg-background px-3 text-sm shadow-xs';
 
-export default function ListeningHistory({ listens, filters }: Props) {
+function PollBulkMatch() {
+    usePoll(3000, {
+        only: [
+            'bulkRun',
+            'bulkSelection',
+            'listens',
+            'pendingMusicBrainzCount',
+        ],
+    });
+
+    return null;
+}
+
+export default function ListeningHistory({
+    listens,
+    filters,
+    bulkSelection,
+    bulkRun,
+    pendingMusicBrainzCount,
+}: Props) {
     const { errors } = usePage().props;
+    const [updatingSelection, setUpdatingSelection] = useState(false);
+    const activeRun =
+        bulkRun !== null &&
+        ['queued', 'running', 'waiting', 'paused'].includes(bulkRun.status);
+    const visibleUnmatched = listens.data.filter(
+        (listen) => listen.recording_mbid === null,
+    );
+    useEffect(() => {
+        if (bulkSelection.needsClear) {
+            router.post(
+                updateSelection.url(),
+                { ...filters, action: 'clear' },
+                {
+                    preserveScroll: true,
+                    preserveState: true,
+                    onStart: () => setUpdatingSelection(true),
+                    onFinish: () => setUpdatingSelection(false),
+                },
+            );
+        }
+    }, [bulkSelection.needsClear, filters]);
+    const changeSelection = (
+        action: 'all' | 'clear' | 'add' | 'remove',
+        ids: number[] = [],
+    ) => {
+        router.post(
+            updateSelection.url(),
+            { ...filters, action, ids },
+            {
+                preserveScroll: true,
+                preserveState: true,
+                onStart: () => setUpdatingSelection(true),
+                onFinish: () => setUpdatingSelection(false),
+            },
+        );
+    };
 
     return (
         <>
@@ -165,6 +254,130 @@ export default function ListeningHistory({ listens, filters }: Props) {
                         </div>
                     </Form>
 
+                    <div className="mt-6 space-y-3 rounded-lg border p-4">
+                        <h2 className="font-semibold">
+                            Match selected listens with MusicBrainz
+                        </h2>
+                        <p className="text-sm text-muted-foreground">
+                            This sends selected track, artist and album names to
+                            MusicBrainz. Only unique exact title and artist
+                            matches are applied; if no album match is found, the
+                            search is retried without the album. Linked catalog
+                            recordings may also update unselected listens.
+                            Matching runs in the background and requires the
+                            imports queue worker and a cache shared by all app
+                            workers and instances for MusicBrainz throttling. If
+                            needed, run{' '}
+                            <code>
+                                php artisan queue:work imports --queue=imports
+                                --timeout=7200 --tries=1
+                            </code>
+                            .
+                        </p>
+                        <p className="text-sm" role="status">
+                            {bulkSelection.count} selected
+                            {bulkSelection.all &&
+                                ' (all filtered unmatched listens)'}
+                        </p>
+                        <p className="text-sm">
+                            <Link href={reviewBulk()} className="underline">
+                                Review pending MusicBrainz matches (
+                                {pendingMusicBrainzCount})
+                            </Link>
+                        </p>
+                        <div className="flex flex-wrap gap-2">
+                            <Button
+                                type="button"
+                                variant="outline"
+                                disabled={updatingSelection || activeRun}
+                                onClick={() => changeSelection('all')}
+                            >
+                                Select all filtered unmatched listens
+                            </Button>
+                            <Button
+                                type="button"
+                                variant="outline"
+                                disabled={
+                                    updatingSelection ||
+                                    activeRun ||
+                                    bulkSelection.count === 0
+                                }
+                                onClick={() => changeSelection('clear')}
+                            >
+                                Clear selection
+                            </Button>
+                            <Form
+                                {...startBulk.form()}
+                                onBefore={() =>
+                                    window.confirm(
+                                        'Send the selected track, artist and album names to MusicBrainz for automatic matching?',
+                                    )
+                                }
+                            >
+                                {Object.entries(filters).map(([key, value]) =>
+                                    value ? (
+                                        <input
+                                            key={key}
+                                            type="hidden"
+                                            name={key}
+                                            value={value}
+                                        />
+                                    ) : null,
+                                )}
+                                <input type="hidden" name="confirm" value="1" />
+                                <Button
+                                    disabled={
+                                        updatingSelection ||
+                                        activeRun ||
+                                        bulkSelection.count === 0
+                                    }
+                                >
+                                    Queue matching
+                                </Button>
+                            </Form>
+                        </div>
+                        <InputError
+                            message={errors.selection ?? errors.confirm}
+                        />
+                        {bulkRun && (
+                            <div className="space-y-2 text-sm" role="status">
+                                {['queued', 'running', 'waiting'].includes(
+                                    bulkRun.status,
+                                ) && <PollBulkMatch />}
+                                <p>
+                                    Bulk match: {bulkRun.status} ·{' '}
+                                    {bulkRun.processed}/{bulkRun.total}{' '}
+                                    processed · {bulkRun.matched} matched ·{' '}
+                                    {bulkRun.unmatched} unmatched ·{' '}
+                                    {bulkRun.skipped} skipped ·{' '}
+                                    {bulkRun.propagated} linked listens updated.
+                                </p>
+                                {bulkRun.error && <p>{bulkRun.error}</p>}
+                                {bulkRun.retry_at && (
+                                    <p>
+                                        Retry scheduled at {bulkRun.retry_at}.
+                                    </p>
+                                )}
+                                {activeRun && (
+                                    <div className="flex gap-2">
+                                        <Form {...cancelBulk.form(bulkRun.id)}>
+                                            <Button variant="outline">
+                                                Cancel matching
+                                            </Button>
+                                        </Form>
+                                        {bulkRun.status === 'paused' && (
+                                            <Form
+                                                {...resumeBulk.form(bulkRun.id)}
+                                            >
+                                                <Button>Resume matching</Button>
+                                            </Form>
+                                        )}
+                                    </div>
+                                )}
+                            </div>
+                        )}
+                    </div>
+
                     <p className="mt-6 text-sm text-muted-foreground">
                         {listens.total}{' '}
                         {listens.total === 1 ? 'listen' : 'listens'}
@@ -173,6 +386,36 @@ export default function ListeningHistory({ listens, filters }: Props) {
                         <table className="w-full text-left text-sm">
                             <thead>
                                 <tr className="border-b text-muted-foreground">
+                                    <th className="p-2">
+                                        <input
+                                            type="checkbox"
+                                            aria-label="Select unmatched listens on this page"
+                                            checked={
+                                                visibleUnmatched.length > 0 &&
+                                                visibleUnmatched.every(
+                                                    (listen) =>
+                                                        bulkSelection.ids.includes(
+                                                            listen.id,
+                                                        ),
+                                                )
+                                            }
+                                            disabled={
+                                                updatingSelection ||
+                                                activeRun ||
+                                                visibleUnmatched.length === 0
+                                            }
+                                            onChange={(event) =>
+                                                changeSelection(
+                                                    event.target.checked
+                                                        ? 'add'
+                                                        : 'remove',
+                                                    visibleUnmatched.map(
+                                                        (listen) => listen.id,
+                                                    ),
+                                                )
+                                            }
+                                        />
+                                    </th>
                                     <th className="p-2">Played (UTC)</th>
                                     <th className="p-2">Track</th>
                                     <th className="p-2">Artist</th>
@@ -184,6 +427,29 @@ export default function ListeningHistory({ listens, filters }: Props) {
                             <tbody>
                                 {listens.data.map((listen) => (
                                     <tr key={listen.id} className="border-b">
+                                        <td className="p-2">
+                                            <input
+                                                type="checkbox"
+                                                aria-label={`Select ${listen.track_name} by ${listen.artist_name}`}
+                                                checked={bulkSelection.ids.includes(
+                                                    listen.id,
+                                                )}
+                                                disabled={
+                                                    updatingSelection ||
+                                                    activeRun ||
+                                                    listen.recording_mbid !==
+                                                        null
+                                                }
+                                                onChange={(event) =>
+                                                    changeSelection(
+                                                        event.target.checked
+                                                            ? 'add'
+                                                            : 'remove',
+                                                        [listen.id],
+                                                    )
+                                                }
+                                            />
+                                        </td>
                                         <td className="p-2 whitespace-nowrap">
                                             {new Date(listen.listened_at * 1000)
                                                 .toISOString()

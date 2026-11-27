@@ -1,10 +1,12 @@
 <?php
 
+use App\Http\Controllers\BulkMusicBrainzController;
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\ImportController;
 use App\Http\Controllers\ListenController;
 use App\Http\Controllers\ManualMatchController;
 use App\Http\Controllers\MusicEntityController;
+use App\Http\Controllers\PendingMusicBrainzMatchController;
 use Illuminate\Support\Facades\Route;
 
 Route::inertia('/', 'welcome')->name('home');
@@ -12,6 +14,13 @@ Route::inertia('/', 'welcome')->name('home');
 Route::middleware(['auth', 'verified'])->group(function () {
     Route::get('dashboard', DashboardController::class)->name('dashboard');
     Route::get('listens', [ListenController::class, 'index'])->name('listens.index');
+    Route::post('listens/bulk-musicbrainz/selection', [BulkMusicBrainzController::class, 'selection'])->name('listens.bulk-musicbrainz.selection');
+    Route::post('listens/bulk-musicbrainz', [BulkMusicBrainzController::class, 'store'])->name('listens.bulk-musicbrainz.store');
+    Route::post('listens/bulk-musicbrainz/{run}/cancel', [BulkMusicBrainzController::class, 'cancel'])->name('listens.bulk-musicbrainz.cancel');
+    Route::post('listens/bulk-musicbrainz/{run}/resume', [BulkMusicBrainzController::class, 'resume'])->name('listens.bulk-musicbrainz.resume');
+    Route::get('listens/bulk-musicbrainz/review', [PendingMusicBrainzMatchController::class, 'index'])->name('listens.bulk-musicbrainz.review');
+    Route::post('listens/bulk-musicbrainz/review/{pending}', [PendingMusicBrainzMatchController::class, 'approve'])->name('listens.bulk-musicbrainz.approve');
+    Route::delete('listens/bulk-musicbrainz/review/{pending}', [PendingMusicBrainzMatchController::class, 'destroy'])->name('listens.bulk-musicbrainz.dismiss');
     Route::post('listens/import', [ListenController::class, 'store'])->name('listens.import');
     Route::post('imports', [ImportController::class, 'store'])->name('imports.store');
     Route::post('imports/{import}/retry', [ImportController::class, 'retry'])->name('imports.retry');

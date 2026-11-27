@@ -2,6 +2,7 @@
 
 namespace App\Services;
 
+use App\Exceptions\MusicBrainzTemporaryException;
 use Illuminate\Contracts\Cache\LockTimeoutException;
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Support\Facades\Cache;
@@ -12,6 +13,81 @@ use Illuminate\Validation\ValidationException;
 
 class MusicBrainzApi
 {
+    /** @return array{recording_mbid: string, artist_name: string, artist_mbids: list<string>, artist_names: array<string, string>, release_mbid: null}|null */
+    public function matchListenRecording(string $title, string $artist, string $album): ?array
+    {
+        return $this->findListenRecordings($title, $artist, $album)['match'];
+    }
+
+    /**
+     * @return array{match: array{recording_mbid: string, artist_name: string, artist_mbids: list<string>, artist_names: array<string, string>, release_mbid: null}|null, candidates: list<array{recording_mbid: string, track_name: string, artist_name: string, artist_mbids: list<string>, artist_names: array<string, string>, release_mbid: null, releases: list<string>, album_verified: bool}>, incomplete: bool}
+     */
+    public function findListenRecordings(string $title, string $artist, string $album, ?\Closure $shouldContinue = null): array
+    {
+        if (trim($title) === '' || trim($artist) === '' || mb_strtolower(trim($artist)) === 'unknown artist') {
+            return ['match' => null, 'candidates' => [], 'incomplete' => false];
+        }
+        $result = $this->searchListenRecordings($title, $artist, $album, trim($album) !== '');
+        if (trim($album) === '' || $result['match'] !== null || $result['incomplete']
+            || collect($result['candidates'])->contains('album_verified', true)
+            || ($shouldContinue !== null && ! $shouldContinue())) {
+            return $result;
+        }
+
+        return $this->searchListenRecordings($title, $artist, $album, false);
+    }
+
+    /**
+     * @return array{match: array{recording_mbid: string, artist_name: string, artist_mbids: list<string>, artist_names: array<string, string>, release_mbid: null}|null, candidates: list<array{recording_mbid: string, track_name: string, artist_name: string, artist_mbids: list<string>, artist_names: array<string, string>, release_mbid: null, releases: list<string>, album_verified: bool}>, incomplete: bool}
+     */
+    private function searchListenRecordings(string $title, string $artist, string $album, bool $requireAlbum): array
+    {
+        $query = 'recording:"'.$this->escape(trim($title)).'" AND artist:"'.$this->escape(trim($artist)).'"';
+        if ($requireAlbum) {
+            $query .= ' AND release:"'.$this->escape(trim($album)).'"';
+        }
+        $data = $this->get('recording', ['query' => $query, 'limit' => 100, 'offset' => 0, 'fmt' => 'json'], 'musicbrainz_api', background: true);
+        if (! is_int($data['count'] ?? null) || ! is_array($data['recordings'] ?? null) || ! array_is_list($data['recordings'])) {
+            $this->fail('musicbrainz_api', 'MusicBrainz returned an invalid search response.');
+        }
+        if ($data['count'] < count($data['recordings'])) {
+            $this->fail('musicbrainz_api', 'MusicBrainz returned an invalid search response.');
+        }
+        $incomplete = $data['count'] > count($data['recordings']);
+        $matches = [];
+        $albumUncertain = false;
+        foreach ($data['recordings'] as $recording) {
+            $match = $this->parseRecording($recording, 'musicbrainz_api');
+            if ($match['track_name'] !== $title || $match['artist_name'] !== $artist) {
+                continue;
+            }
+            $releases = $recording['releases'] ?? [];
+            if (! is_array($releases) || ! array_is_list($releases)) {
+                $this->fail('musicbrainz_api', 'MusicBrainz returned invalid release metadata.');
+            }
+            $releaseTitles = [];
+            foreach ($releases as $release) {
+                if (! is_array($release) || ! is_string($release['title'] ?? null) || trim($release['title']) === '') {
+                    $this->fail('musicbrainz_api', 'MusicBrainz returned invalid release metadata.');
+                }
+                $releaseTitles[] = $release['title'];
+            }
+            $verified = trim($album) === '' || in_array($album, $releaseTitles, true);
+            $albumUncertain = $albumUncertain || ! $verified;
+            $matches[$match['recording_mbid']] = $match + [
+                'release_mbid' => null, 'releases' => array_values(array_unique($releaseTitles)), 'album_verified' => $verified,
+            ];
+        }
+        $match = null;
+        if (! $incomplete && (! $requireAlbum || ! $albumUncertain) && count($matches) === 1) {
+            $candidate = reset($matches);
+            $match = ['recording_mbid' => $candidate['recording_mbid'], 'artist_name' => $candidate['artist_name'],
+                'artist_mbids' => $candidate['artist_mbids'], 'artist_names' => $candidate['artist_names'], 'release_mbid' => null];
+        }
+
+        return ['match' => $match, 'candidates' => $match === null ? array_values($matches) : [], 'incomplete' => $incomplete];
+    }
+
     /** @return array{results: list<array{recording_mbid: string, track_name: string, artist_name: string, first_release_year: ?int, releases: list<array{mbid: string, title: string, artist: ?string, group_type: ?string}>}>, hasMore: bool} */
     public function search(string $title, string $artist, int $page): array
     {
@@ -263,10 +339,17 @@ class MusicBrainzApi
     /** @param array<string, string|int> $query
      * @return array<string, mixed>
      */
-    private function get(string $path, array $query, string $errorKey): array
+    private function get(string $path, array $query, string $errorKey, bool $background = false): array
     {
         try {
-            $response = Cache::lock('musicbrainz-api-lock', 30)->block(30, function () use ($path, $query) {
+            $response = Cache::lock('musicbrainz-api-lock', 30)->block(30, function () use ($path, $query, $background) {
+                $cooldown = Cache::get('musicbrainz-api-cooldown');
+                if ($cooldown !== null && (! is_numeric($cooldown) || (float) $cooldown > microtime(true))) {
+                    if (! is_numeric($cooldown)) {
+                        throw new \UnexpectedValueException('Invalid MusicBrainz API cooldown timestamp.');
+                    }
+                    throw new MusicBrainzTemporaryException('MusicBrainz is rate-limited.', (int) ceil((float) $cooldown - microtime(true)));
+                }
                 $last = Cache::get('musicbrainz-api-last-request');
                 if ($last !== null && ! is_numeric($last)) {
                     throw new \UnexpectedValueException('Invalid MusicBrainz API throttle timestamp.');
@@ -279,17 +362,44 @@ class MusicBrainzApi
                 }
                 Cache::put('musicbrainz-api-last-request', microtime(true), 60);
 
-                return Http::acceptJson()
+                $response = Http::acceptJson()
                     ->withUserAgent('StreamingHistoryConsolidator/1.0 (https://github.com/knutle/streaming-history-consolidator)')
                     ->connectTimeout(5)->timeout(15)->withoutRedirecting()
                     ->get('https://musicbrainz.org/ws/2/'.$path, $query);
+                if (in_array($response->status(), [429, 503], true) || ($background && $response->serverError())) {
+                    $header = $response->header('Retry-After');
+                    $retryAfter = ctype_digit($header) ? (int) $header : 0;
+                    if ($retryAfter === 0 && ! ctype_digit($header)) {
+                        $date = strtotime($header);
+                        $retryAfter = $date === false ? 0 : max(0, $date - time());
+                    }
+                    if ($background) {
+                        $retryAfter = max(5, $retryAfter);
+                    }
+                    if ($retryAfter > 0) {
+                        if (! Cache::put('musicbrainz-api-cooldown', microtime(true) + $retryAfter, $retryAfter + 1)) {
+                            throw new \RuntimeException('Could not save the MusicBrainz API cooldown.');
+                        }
+                    }
+                    throw new MusicBrainzTemporaryException('MusicBrainz is unavailable or rate-limited.', $retryAfter);
+                }
+
+                return $response;
             });
         } catch (LockTimeoutException) {
+            if ($background) {
+                throw new MusicBrainzTemporaryException('MusicBrainz is busy.');
+            }
             $this->fail($errorKey, 'MusicBrainz is busy. Please try again later.');
         } catch (ConnectionException) {
+            if ($background) {
+                throw new MusicBrainzTemporaryException('Could not connect to MusicBrainz.');
+            }
             $this->fail($errorKey, 'Could not connect to MusicBrainz. Please try again.');
-        }
-        if ($response->status() === 503 || $response->status() === 429) {
+        } catch (MusicBrainzTemporaryException $exception) {
+            if ($background) {
+                throw $exception;
+            }
             $this->fail($errorKey, 'MusicBrainz is unavailable or rate-limited. Please try again later.');
         }
         if (! $response->successful()) {
