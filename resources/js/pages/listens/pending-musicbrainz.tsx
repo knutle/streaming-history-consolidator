@@ -1,4 +1,4 @@
-import { Head, Link, usePage } from '@inertiajs/react';
+import { Head, Link, usePage, usePoll } from '@inertiajs/react';
 import Form from '@/components/form';
 import InputError from '@/components/input-error';
 import { Button } from '@/components/ui/button';
@@ -13,6 +13,11 @@ type PendingMatch = {
     release_name: string | null;
     recording_mbid: string | null;
     incomplete: boolean;
+    association: {
+        status: 'queued' | 'running' | 'completed' | 'failed';
+        matched: number | null;
+        error: string | null;
+    } | null;
     candidates: {
         recording_mbid: string;
         track_name: string;
@@ -28,10 +33,71 @@ type Props = {
         total: number;
         links: { url: string | null; label: string; active: boolean }[];
     };
+    bulkRun: {
+        status: string;
+        matched: number;
+        propagated: number;
+    } | null;
+    autoMatched: {
+        data: {
+            id: number;
+            track_name: string;
+            artist_name: string;
+            release_name: string | null;
+            recording_mbid: string | null;
+        }[];
+        total: number;
+        links: { url: string | null; label: string; active: boolean }[];
+    };
 };
 
-export default function PendingMusicBrainzMatches({ pending }: Props) {
+function PollPendingMatches() {
+    usePoll(3000, { only: ['pending', 'bulkRun', 'autoMatched'] });
+
+    return null;
+}
+
+function Pagination({
+    label,
+    links,
+}: {
+    label: string;
+    links: { url: string | null; label: string; active: boolean }[];
+}) {
+    return (
+        <nav aria-label={label} className="flex flex-wrap gap-3 text-sm">
+            {links.map((link, index) =>
+                link.url ? (
+                    <Link
+                        key={index}
+                        href={link.url}
+                        aria-current={link.active ? 'page' : undefined}
+                    >
+                        {link.label
+                            .replace('&laquo;', '‹')
+                            .replace('&raquo;', '›')}
+                    </Link>
+                ) : (
+                    <span key={index} className="text-muted-foreground">
+                        {link.label
+                            .replace('&laquo;', '‹')
+                            .replace('&raquo;', '›')}
+                    </span>
+                ),
+            )}
+        </nav>
+    );
+}
+
+export default function PendingMusicBrainzMatches({
+    pending,
+    bulkRun,
+    autoMatched,
+}: Props) {
     const { errors } = usePage().props;
+    const bulkActive =
+        bulkRun !== null &&
+        ['queued', 'running', 'waiting'].includes(bulkRun.status);
 
     return (
         <>
@@ -42,17 +108,93 @@ export default function PendingMusicBrainzMatches({ pending }: Props) {
                         Review MusicBrainz matches
                     </h1>
                     <p className="mt-2 text-sm text-muted-foreground">
-                        These results were not applied automatically. Approving
-                        a recording may also update linked catalog listens;
-                        existing matches and saved conflicting choices are not
-                        overwritten.
+                        Review the latest bulk match and any pending candidates.
+                        Approving a recording may also update linked catalog
+                        listens; existing matches and saved conflicting choices
+                        are not overwritten.
                     </p>
                     <Link href={listensIndex()} className="text-sm underline">
                         Back to listening history
                     </Link>
                 </div>
                 <InputError message={errors.recording_mbid} />
-                <p className="text-sm">{pending.total} pending reviews</p>
+                {(bulkActive ||
+                    pending.data.some(
+                        (item) =>
+                            item.association?.status === 'queued' ||
+                            item.association?.status === 'running',
+                    )) && <PollPendingMatches />}
+                <section className="space-y-3 rounded-xl border p-5">
+                    <h2 className="font-semibold">
+                        Automatically matched in the latest bulk run
+                    </h2>
+                    {bulkRun ? (
+                        <>
+                            <p role="status" className="text-sm">
+                                {bulkRun.status} · {bulkRun.matched} selected
+                                listens matched · {bulkRun.propagated} linked
+                                listens updated
+                            </p>
+                            {autoMatched.total < bulkRun.matched && (
+                                <p className="text-sm text-muted-foreground">
+                                    Some matched listens are no longer
+                                    available.
+                                </p>
+                            )}
+                            {autoMatched.total === 0 ? (
+                                <p className="text-sm">
+                                    No available auto-matched listens.
+                                </p>
+                            ) : (
+                                <>
+                                    <ul className="divide-y">
+                                        {autoMatched.data.map((item) => (
+                                            <li
+                                                key={item.id}
+                                                className="py-3 text-sm"
+                                            >
+                                                <Link
+                                                    href={show(item.id)}
+                                                    className="underline"
+                                                >
+                                                    {item.track_name} ·{' '}
+                                                    {item.artist_name}
+                                                    {item.release_name
+                                                        ? ` · ${item.release_name}`
+                                                        : ''}
+                                                </Link>
+                                                {item.recording_mbid && (
+                                                    <p>
+                                                        <a
+                                                            href={`https://musicbrainz.org/recording/${encodeURIComponent(item.recording_mbid)}`}
+                                                            target="_blank"
+                                                            rel="noreferrer"
+                                                            className="underline"
+                                                        >
+                                                            Current MusicBrainz
+                                                            recording
+                                                        </a>
+                                                    </p>
+                                                )}
+                                            </li>
+                                        ))}
+                                    </ul>
+                                    <Pagination
+                                        label="Auto-matched listens pagination"
+                                        links={autoMatched.links}
+                                    />
+                                </>
+                            )}
+                        </>
+                    ) : (
+                        <p className="text-sm">
+                            No bulk match has been run yet.
+                        </p>
+                    )}
+                </section>
+                <h2 className="font-semibold">
+                    Pending reviews ({pending.total})
+                </h2>
                 {pending.data.map((item) => (
                     <section key={item.id} className="rounded-xl border p-5">
                         <h2 className="font-semibold">
@@ -75,6 +217,13 @@ export default function PendingMusicBrainzMatches({ pending }: Props) {
                             <p className="text-sm">
                                 MusicBrainz returned only part of the results;
                                 other recordings may exist.
+                            </p>
+                        )}
+                        {item.association && (
+                            <p role="status" className="text-sm">
+                                {item.association.status === 'failed'
+                                    ? item.association.error
+                                    : `Recording association ${item.association.status}.`}
                             </p>
                         )}
                         <ul className="mt-3 divide-y">
@@ -118,6 +267,12 @@ export default function PendingMusicBrainzMatches({ pending }: Props) {
                                                 <Button
                                                     disabled={
                                                         processing ||
+                                                        item.association
+                                                            ?.status ===
+                                                            'queued' ||
+                                                        item.association
+                                                            ?.status ===
+                                                            'running' ||
                                                         item.recording_mbid !==
                                                             null
                                                     }
@@ -132,7 +287,14 @@ export default function PendingMusicBrainzMatches({ pending }: Props) {
                         </ul>
                         <Form {...dismiss.form(item.id)}>
                             {({ processing }) => (
-                                <Button variant="outline" disabled={processing}>
+                                <Button
+                                    variant="outline"
+                                    disabled={
+                                        processing ||
+                                        item.association?.status === 'queued' ||
+                                        item.association?.status === 'running'
+                                    }
+                                >
                                     Dismiss review
                                 </Button>
                             )}
@@ -142,30 +304,10 @@ export default function PendingMusicBrainzMatches({ pending }: Props) {
                 {pending.total === 0 && (
                     <p className="text-sm">No matches need review.</p>
                 )}
-                <nav
-                    aria-label="Pagination"
-                    className="flex flex-wrap gap-3 text-sm"
-                >
-                    {pending.links.map((link, index) =>
-                        link.url ? (
-                            <Link
-                                key={index}
-                                href={link.url}
-                                aria-current={link.active ? 'page' : undefined}
-                            >
-                                {link.label
-                                    .replace('&laquo;', '‹')
-                                    .replace('&raquo;', '›')}
-                            </Link>
-                        ) : (
-                            <span key={index} className="text-muted-foreground">
-                                {link.label
-                                    .replace('&laquo;', '‹')
-                                    .replace('&raquo;', '›')}
-                            </span>
-                        ),
-                    )}
-                </nav>
+                <Pagination
+                    label="Pending reviews pagination"
+                    links={pending.links}
+                />
             </div>
         </>
     );

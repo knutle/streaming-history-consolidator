@@ -222,7 +222,8 @@ class ListenImportTest extends TestCase
             ->has('related', 1));
         $this->post(route('listens.match', $listen->id), [
             'recording_mbid' => '22222222-2222-4222-8222-222222222222', 'track_name' => 'Track', 'artist_name' => 'Artist',
-        ])->assertRedirect(route('listens.show', $listen->id))->assertSessionHas('match_result', 2);
+        ])->assertRedirect(route('listens.show', $listen->id))->assertSessionHasNoErrors();
+        $this->processRecordingAssociation();
 
         $this->assertSame(2, Listen::query()->where('user_id', $user->id)->where('recording_mbid', '22222222-2222-4222-8222-222222222222')->count());
         $this->assertNull(Listen::query()->where('user_id', $other->id)->sole()->recording_mbid);
@@ -265,7 +266,8 @@ class ListenImportTest extends TestCase
         $this->musicbrainz();
         $this->post(route('listens.match', $spotify->id), [
             'recording_mbid' => '22222222-2222-4222-8222-222222222222', 'track_name' => 'Track', 'artist_name' => 'Artist',
-        ])->assertSessionHas('match_result', 2);
+        ])->assertSessionHasNoErrors();
+        $this->processRecordingAssociation();
         $this->assertSame('22222222-2222-4222-8222-222222222222', $apple->fresh()->recording_mbid);
         $saved = json_decode(DB::table('catalog_recording_groups')->value('recording_match'), true, 512, JSON_THROW_ON_ERROR);
         $this->assertSame(['11111111-1111-4111-8111-111111111111'], $saved['artist_mbids']);
@@ -285,6 +287,7 @@ class ListenImportTest extends TestCase
         $this->post(route('listens.match', $listen->id), [
             'recording_mbid' => '22222222-2222-4222-8222-222222222222', 'track_name' => 'Track', 'artist_name' => 'Artist',
         ])->assertSessionHasNoErrors();
+        $this->processRecordingAssociation();
         $row = DB::table('listen_matches')->where('user_id', $user->id)->first();
         $saved = json_decode($row->match, true, 512, JSON_THROW_ON_ERROR);
         unset($saved['source_track'], $saved['source_artist'], $saved['recording_name']);
@@ -537,7 +540,8 @@ class ListenImportTest extends TestCase
         $this->post(route('listens.match', $listen->id), [
             'recording_mbid' => '22222222-2222-4222-8222-222222222222',
             'track_name' => 'Track', 'artist_name' => 'Verified credit',
-        ])->assertSessionHas('match_result', 1);
+        ])->assertSessionHasNoErrors();
+        $this->processRecordingAssociation();
         $this->get(route('artists.show', '11111111-1111-4111-8111-111111111111'))
             ->assertOk()->assertInertia(fn (Assert $page) => $page
             ->where('entity.name', 'Verified credit')->where('entity.nameSource', 'canonical_credit'));
@@ -620,7 +624,8 @@ class ListenImportTest extends TestCase
         $listen = Listen::query()->sole();
         $this->post(route('listens.match', $listen->id), [
             'recording_mbid' => '22222222-2222-4222-8222-222222222222', 'track_name' => 'Track', 'artist_name' => 'Artist',
-        ])->assertSessionHas('match_result', 1);
+        ])->assertSessionHasNoErrors();
+        $this->processRecordingAssociation();
         $this->assertSame('Different artist', $listen->fresh()->artist_name);
         $this->assertSame('33333333-3333-4333-8333-333333333333', $listen->fresh()->track_metadata['additional_info']['release_mbid']);
         $this->assertSame(['GBXYZ2412345', 'USABC2412345'], $listen->fresh()->track_metadata['additional_info']['isrcs']);

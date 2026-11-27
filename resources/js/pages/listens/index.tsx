@@ -281,7 +281,7 @@ export default function ListeningHistory({
                         </p>
                         <p className="text-sm">
                             <Link href={reviewBulk()} className="underline">
-                                Review pending MusicBrainz matches (
+                                View auto-matched listens and pending reviews (
                                 {pendingMusicBrainzCount})
                             </Link>
                         </p>

@@ -3,6 +3,7 @@
 namespace Tests\Feature;
 
 use App\Jobs\ProcessBulkMusicBrainzMatch;
+use App\Jobs\ProcessRecordingAssociation;
 use App\Models\Listen;
 use App\Models\User;
 use App\Services\CatalogMatcher;
@@ -15,6 +16,7 @@ use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Sleep;
+use Illuminate\Validation\ValidationException;
 use Inertia\Testing\AssertableInertia as Assert;
 use Tests\TestCase;
 
@@ -109,6 +111,75 @@ class BulkMusicBrainzMatchingTest extends TestCase
         ]);
         $this->assertDatabaseCount('pending_musicbrainz_matches', 0);
         Http::assertSentCount(2);
+    }
+
+    public function test_review_shows_only_the_current_users_latest_bulk_run_auto_matches(): void
+    {
+        Queue::fake([ProcessBulkMusicBrainzMatch::class]);
+        Http::preventStrayRequests();
+        $user = User::factory()->create();
+        $other = User::factory()->create();
+        $matched = $this->listen($user, 1, 'Song');
+        $pending = $this->listen($user, 2, 'Ambiguous');
+        $this->actingAs($user)->post(route('listens.bulk-musicbrainz.selection'), ['action' => 'all']);
+        $this->post(route('listens.bulk-musicbrainz.store'), ['confirm' => '1']);
+        $run = DB::table('bulk_musicbrainz_runs')->sole();
+        Http::fake(['musicbrainz.org/ws/2/recording?*' => function (Request $request) {
+            if (str_contains($request['query'], 'Ambiguous')) {
+                $first = $this->recording();
+                $first['title'] = 'Ambiguous';
+                $second = $first;
+                $second['id'] = '33333333-3333-4333-8333-333333333333';
+
+                return Http::response(['count' => 2, 'recordings' => [$first, $second]]);
+            }
+
+            return Http::response(['count' => 1, 'recordings' => [$this->recording()]]);
+        }]);
+        $this->runJob($run->id);
+        $this->runJob($run->id);
+        $this->runJob($run->id);
+        $this->withoutVite();
+        $this->get(route('listens.bulk-musicbrainz.review'))->assertInertia(fn (Assert $page) => $page
+            ->where('bulkRun.id', $run->id)->where('bulkRun.matched', 1)
+            ->where('autoMatched.total', 1)->where('autoMatched.data.0.id', $matched->id)
+            ->where('autoMatched.data.0.recording_mbid', $this->recording()['id'])
+            ->where('pending.total', 1)->where('pending.data.0.listen_id', $pending->id));
+        $this->actingAs($other)->get(route('listens.bulk-musicbrainz.review'))->assertInertia(fn (Assert $page) => $page
+            ->where('bulkRun', null)->where('autoMatched.total', 0)->where('pending.total', 0));
+        $this->actingAs($user)->post(route('listens.bulk-musicbrainz.selection'), ['action' => 'add', 'ids' => [$pending->id]]);
+        $this->post(route('listens.bulk-musicbrainz.store'), ['confirm' => '1']);
+        $this->get(route('listens.bulk-musicbrainz.review'))->assertInertia(fn (Assert $page) => $page
+            ->where('bulkRun.status', 'queued')->where('autoMatched.total', 0)->where('pending.total', 1));
+    }
+
+    public function test_auto_matches_and_pending_reviews_paginate_independently(): void
+    {
+        $user = User::factory()->create();
+        $run = DB::table('bulk_musicbrainz_runs')->insertGetId([
+            'user_id' => $user->id, 'status' => 'completed', 'matched' => 27,
+        ]);
+        for ($number = 1; $number <= 27; $number++) {
+            $listen = $this->listen($user, $number);
+            $listen->update(['recording_mbid' => $this->recording()['id']]);
+            DB::table('bulk_musicbrainz_run_items')->insert([
+                'run_id' => $run, 'listen_id' => $listen->id, 'status' => 'matched',
+            ]);
+            DB::table('pending_musicbrainz_matches')->insert([
+                'user_id' => $user->id, 'listen_id' => $listen->id,
+                'track_name' => 'Song', 'artist_name' => 'Artist', 'release_name' => 'Album',
+                'candidates' => '[]', 'created_at' => now(), 'updated_at' => now(),
+            ]);
+        }
+        $listen->delete();
+        $this->withoutVite()->actingAs($user)->get(route('listens.bulk-musicbrainz.review', [
+            'matched_page' => 2, 'page' => 1,
+        ]))->assertInertia(fn (Assert $page) => $page
+            ->where('bulkRun.matched', 27)->where('autoMatched.total', 26)
+            ->where('autoMatched.current_page', 2)->has('autoMatched.data', 1)
+            ->where('pending.current_page', 1)->has('pending.data', 25)
+            ->where('autoMatched.links.1.url', route('listens.bulk-musicbrainz.review', ['page' => 1, 'matched_page' => 1]))
+            ->where('pending.links.2.url', route('listens.bulk-musicbrainz.review', ['matched_page' => 2, 'page' => 2])));
     }
 
     public function test_rate_limits_retry_then_pause_and_can_resume_or_cancel(): void
@@ -401,6 +472,11 @@ class BulkMusicBrainzMatchingTest extends TestCase
             'recording_mbid' => '44444444-4444-4444-8444-444444444444',
         ])->assertSessionHasErrors('recording_mbid');
         $this->post(route('listens.bulk-musicbrainz.approve', $review->id), ['recording_mbid' => $chosen])->assertSessionHasNoErrors();
+        $this->assertNull($first->fresh()->recording_mbid);
+        $this->post(route('listens.bulk-musicbrainz.approve', $review->id), ['recording_mbid' => $chosen])
+            ->assertSessionHasErrors('recording_mbid');
+        $this->delete(route('listens.bulk-musicbrainz.dismiss', $review->id))->assertSessionHasErrors('recording_mbid');
+        $this->processRecordingAssociation();
         $this->assertSame($chosen, $first->fresh()->recording_mbid);
         $this->assertNull($second->fresh()->recording_mbid);
         $this->assertDatabaseMissing('pending_musicbrainz_matches', ['id' => $review->id]);
@@ -462,7 +538,21 @@ class BulkMusicBrainzMatchingTest extends TestCase
         ]);
         $this->post(route('listens.bulk-musicbrainz.approve', $review->id), [
             'recording_mbid' => $recording['id'],
-        ])->assertSessionHasErrors('recording_mbid');
+        ])->assertSessionHasNoErrors();
+        $job = new ProcessRecordingAssociation(DB::table('recording_association_runs')->value('id'));
+        try {
+            app()->call([$job, 'handle']);
+            $this->fail('A conflicting saved match must fail.');
+        } catch (ValidationException $exception) {
+            $job->failed($exception);
+        }
+        $this->assertDatabaseHas('recording_association_runs', [
+            'status' => 'failed', 'error' => 'This choice conflicts with a saved or linked match. Resolve the conflict first.',
+        ]);
+        $this->withoutVite();
+        $this->get(route('listens.bulk-musicbrainz.review'))->assertInertia(fn (Assert $page) => $page
+            ->where('pending.data.0.association.status', 'failed')
+            ->where('pending.data.0.association.error', 'This choice conflicts with a saved or linked match. Resolve the conflict first.'));
         $this->assertNull($listen->fresh()->recording_mbid);
         $this->assertDatabaseHas('pending_musicbrainz_matches', ['id' => $review->id]);
         Http::assertSentCount(2);

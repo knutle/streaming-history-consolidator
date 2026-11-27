@@ -1,4 +1,4 @@
-import { Head, Link, useHttp, usePage } from '@inertiajs/react';
+import { Head, Link, useHttp, usePage, usePoll } from '@inertiajs/react';
 import { useRef, useState } from 'react';
 import Form from '@/components/form';
 import InputError from '@/components/input-error';
@@ -106,6 +106,11 @@ type Props = {
     searchPage: number;
     hasMore: boolean;
     matchResult: number | null;
+    recordingAssociation: {
+        status: 'queued' | 'running' | 'completed' | 'failed';
+        matched: number | null;
+        error: string | null;
+    } | null;
     catalogResult: number | null;
     mergeResult: string | null;
     mergeSearch: string;
@@ -164,6 +169,23 @@ function catalogUrl(provider: 'apple' | 'spotify', id: string) {
         : `https://music.apple.com/us/song/${encodeURIComponent(id)}`;
 }
 
+function PollRecordingAssociation() {
+    usePoll(3000, {
+        only: [
+            'recordingAssociation',
+            'listen',
+            'related',
+            'matchedArtists',
+            'matchedAlbums',
+            'linkedCatalogs',
+            'linkedEvidence',
+            'catalogs',
+        ],
+    });
+
+    return null;
+}
+
 export default function ListenDetails({
     listen,
     related,
@@ -176,6 +198,7 @@ export default function ListenDetails({
     hasMore,
     suggestions,
     matchResult,
+    recordingAssociation,
     catalogResult,
     mergeResult,
     mergeSearch,
@@ -188,6 +211,9 @@ export default function ListenDetails({
     matchedArtists,
     matchedAlbums,
 }: Props) {
+    const associationActive =
+        recordingAssociation?.status === 'queued' ||
+        recordingAssociation?.status === 'running';
     const [selectedCatalog, setSelectedCatalog] = useState<'apple' | 'spotify'>(
         'apple',
     );
@@ -423,6 +449,16 @@ export default function ListenDetails({
                     <p role="status" className="text-sm">
                         Identified {matchResult} matching listens. This choice
                         will also be used for future imports.
+                    </p>
+                )}
+                {associationActive && <PollRecordingAssociation />}
+                {recordingAssociation && (
+                    <p role="status" className="text-sm">
+                        {associationActive
+                            ? `Recording association ${recordingAssociation.status}.`
+                            : recordingAssociation.status === 'failed'
+                              ? recordingAssociation.error
+                              : `Identified ${recordingAssociation.matched} matching listens.`}
                     </p>
                 )}
                 {catalogResult !== null && (
@@ -986,7 +1022,8 @@ export default function ListenDetails({
                                                     variant="outline"
                                                     disabled={
                                                         lookup.processing ||
-                                                        processing
+                                                        processing ||
+                                                        associationActive
                                                     }
                                                     onClick={() =>
                                                         void lookupSpotify()

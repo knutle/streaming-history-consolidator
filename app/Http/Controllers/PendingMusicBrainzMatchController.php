@@ -2,8 +2,8 @@
 
 namespace App\Http\Controllers;
 
+use App\Jobs\ProcessRecordingAssociation;
 use App\Models\Listen;
-use App\Services\BulkMusicBrainzMatcher;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -19,21 +19,40 @@ class PendingMusicBrainzMatchController extends Controller
             ->join('listens', 'listens.id', '=', 'pending_musicbrainz_matches.listen_id')
             ->where('pending_musicbrainz_matches.user_id', $request->user()->id)
             ->orderByDesc('pending_musicbrainz_matches.id')
-            ->paginate(25, ['pending_musicbrainz_matches.*', 'listens.recording_mbid']);
-        $pending->through(function ($row) {
+            ->paginate(25, ['pending_musicbrainz_matches.*', 'listens.recording_mbid'])
+            ->withQueryString();
+        $latest = DB::table('recording_association_runs')->where('user_id', $request->user()->id)
+            ->whereIn('listen_id', $pending->getCollection()->pluck('listen_id'))->groupBy('listen_id')->selectRaw('MAX(id)');
+        $associations = DB::table('recording_association_runs')->whereIn('id', $latest)
+            ->get(['listen_id', 'status', 'matched', 'error'])->keyBy('listen_id');
+        $pending->through(function ($row) use ($associations) {
             $row->candidates = json_decode($row->candidates, true, 512, JSON_THROW_ON_ERROR);
             $row->incomplete = (bool) $row->incomplete;
+            $row->association = $associations->get($row->listen_id);
 
             return $row;
         });
 
-        return Inertia::render('listens/pending-musicbrainz', ['pending' => $pending]);
+        $bulkRun = DB::table('bulk_musicbrainz_runs')->where('user_id', $request->user()->id)
+            ->orderByDesc('id')->first(['id', 'status', 'matched', 'propagated']);
+        $autoMatched = DB::table('bulk_musicbrainz_run_items')
+            ->join('listens', 'listens.id', '=', 'bulk_musicbrainz_run_items.listen_id')
+            ->where('bulk_musicbrainz_run_items.run_id', $bulkRun?->id)
+            ->where('bulk_musicbrainz_run_items.status', 'matched')
+            ->where('listens.user_id', $request->user()->id)
+            ->orderBy('bulk_musicbrainz_run_items.id')
+            ->paginate(25, ['listens.id', 'listens.track_name', 'listens.artist_name', 'listens.release_name', 'listens.recording_mbid'], 'matched_page')
+            ->withQueryString();
+
+        return Inertia::render('listens/pending-musicbrainz', [
+            'pending' => $pending, 'bulkRun' => $bulkRun, 'autoMatched' => $autoMatched,
+        ]);
     }
 
-    public function approve(Request $request, int $pending, BulkMusicBrainzMatcher $matcher): RedirectResponse
+    public function approve(Request $request, int $pending): RedirectResponse
     {
         $values = $request->validate(['recording_mbid' => ['required', 'uuid']]);
-        DB::transaction(function () use ($request, $pending, $matcher, $values): void {
+        DB::transaction(function () use ($request, $pending, $values): void {
             DB::table('users')->where('id', $request->user()->id)->lockForUpdate()->first();
             $row = DB::table('pending_musicbrainz_matches')->where('user_id', $request->user()->id)->where('id', $pending)->first();
             abort_if($row === null, 404);
@@ -57,10 +76,9 @@ class PendingMusicBrainzMatchController extends Controller
                 'artist_names' => $candidate['artist_names'],
                 'release_mbid' => null,
             ];
-            if ($matcher->apply($request->user(), $listen, $match) === null) {
-                throw ValidationException::withMessages(['recording_mbid' => 'This choice conflicts with a saved or linked match. Resolve the conflict first.']);
-            }
-            DB::table('pending_musicbrainz_matches')->where('id', $row->id)->delete();
+            ProcessRecordingAssociation::enqueue($request->user(), $listen, [
+                'type' => 'approval', 'pending_id' => $row->id, 'match' => $match,
+            ]);
         });
 
         return back();
@@ -70,6 +88,12 @@ class PendingMusicBrainzMatchController extends Controller
     {
         DB::transaction(function () use ($request, $pending): void {
             DB::table('users')->where('id', $request->user()->id)->lockForUpdate()->first();
+            $row = DB::table('pending_musicbrainz_matches')->where('user_id', $request->user()->id)->where('id', $pending)->first();
+            abort_if($row === null, 404);
+            if (DB::table('recording_association_runs')->where('user_id', $request->user()->id)
+                ->where('listen_id', $row->listen_id)->whereIn('status', ['queued', 'running'])->exists()) {
+                throw ValidationException::withMessages(['recording_mbid' => 'Wait for the recording association to finish before dismissing this review.']);
+            }
             $deleted = DB::table('pending_musicbrainz_matches')->where('user_id', $request->user()->id)->where('id', $pending)->delete();
             abort_if($deleted !== 1, 404);
         });

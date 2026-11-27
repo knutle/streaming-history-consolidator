@@ -220,7 +220,8 @@ class MusicBrainzSetupTest extends TestCase
         $this->get(route('listens.show', ['listen' => $listen->id, 'q' => 'Tra']))->assertOk();
         $this->post(route('listens.match', $listen->id), [
             'recording_mbid' => '22222222-2222-4222-8222-222222222222', 'track_name' => 'Track', 'artist_name' => 'Artist & Guest',
-        ])->assertSessionHas('match_result', 1);
+        ])->assertSessionHasNoErrors();
+        $this->processRecordingAssociation();
         $this->assertSame('22222222-2222-4222-8222-222222222222', $listen->fresh()->recording_mbid);
     }
 

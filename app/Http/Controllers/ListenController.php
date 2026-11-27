@@ -3,12 +3,12 @@
 namespace App\Http\Controllers;
 
 use App\Http\Requests\ImportListensRequest;
+use App\Jobs\ProcessRecordingAssociation;
 use App\Models\Listen;
 use App\Services\CatalogMatcher;
 use App\Services\CatalogRecordingGroups;
 use App\Services\Isrc;
 use App\Services\ListenFilters;
-use App\Services\ManualListenMatcher;
 use App\Services\MusicBrainzApi;
 use App\Services\MusicBrainzMatcher;
 use App\Services\SpotifyCatalogLookup;
@@ -123,19 +123,27 @@ class ListenController extends Controller
         $artist = $values['artist'] ?? '';
         $page = (int) ($values['page'] ?? 1);
         $source = $values['search_source'] ?? 'local';
-        $candidates = ['results' => [], 'hasMore' => false];
-        $apiError = null;
-        if ($item->recording_mbid === null) {
-            if ($source === 'api') {
-                try {
-                    $candidates = $api->search($search, $artist, $page);
-                } catch (ValidationException $exception) {
-                    $apiError = $exception->errors()['musicbrainz_api'][0];
-                }
-            } else {
-                $candidates = $matcher->search($search, $artist, $page);
+        $searchResult = null;
+        $searchRecordings = function () use (&$searchResult, $item, $source, $api, $matcher, $search, $artist, $page): array {
+            if ($searchResult !== null) {
+                return $searchResult;
             }
-        }
+            $candidates = ['results' => [], 'hasMore' => false];
+            $apiError = null;
+            if ($item->recording_mbid === null) {
+                if ($source === 'api') {
+                    try {
+                        $candidates = $api->search($search, $artist, $page);
+                    } catch (ValidationException $exception) {
+                        $apiError = $exception->errors()['musicbrainz_api'][0];
+                    }
+                } else {
+                    $candidates = $matcher->search($search, $artist, $page);
+                }
+            }
+
+            return $searchResult = ['candidates' => $candidates, 'error' => $apiError];
+        };
         $related = Listen::query()->where('user_id', $request->user()->id)
             ->where('id', '!=', $item->id)
             ->when($item->recording_mbid !== null,
@@ -180,13 +188,16 @@ class ListenController extends Controller
             'related' => $related,
             'musicbrainzEnabled' => (bool) config('musicbrainz.enabled'),
             'searchSource' => $source,
-            'apiError' => $apiError,
+            'apiError' => fn () => $searchRecordings()['error'],
             'search' => $search,
             'artistSearch' => $artist,
             'searchPage' => $page,
-            'hasMore' => $candidates['hasMore'],
-            'suggestions' => $candidates['results'],
+            'hasMore' => fn () => $searchRecordings()['candidates']['hasMore'],
+            'suggestions' => fn () => $searchRecordings()['candidates']['results'],
             'matchResult' => $request->session()->get('match_result'),
+            'recordingAssociation' => DB::table('recording_association_runs')
+                ->where('user_id', $request->user()->id)->where('listen_id', $item->id)
+                ->orderByDesc('id')->first(['status', 'matched', 'error']),
             'catalogResult' => $request->session()->get('catalog_result'),
             'mergeResult' => $request->session()->get('merge_result'),
             'mergeSearch' => $mergeSearch,
@@ -270,7 +281,7 @@ class ListenController extends Controller
         return response()->json($lookup->track($id));
     }
 
-    public function match(Request $request, int $listen, MusicBrainzMatcher $matcher, ManualListenMatcher $manualMatcher, MusicBrainzApi $api): RedirectResponse
+    public function match(Request $request, int $listen, MusicBrainzMatcher $matcher, MusicBrainzApi $api): RedirectResponse
     {
         $item = Listen::query()->where('user_id', $request->user()->id)->whereNull('recording_mbid')->findOrFail($listen);
         $values = $request->validate([
@@ -286,9 +297,20 @@ class ListenController extends Controller
             throw ValidationException::withMessages(['recording_mbid' => 'The selected recording is unavailable in the local MusicBrainz database.']);
         }
 
-        $count = $manualMatcher->remember($request->user(), $item, $match, $values['track_name']);
+        DB::transaction(function () use ($request, $item, $match, $values): void {
+            DB::table('users')->where('id', $request->user()->id)->lockForUpdate()->first();
+            $current = Listen::query()->where('user_id', $request->user()->id)
+                ->whereKey($item->id)->whereNull('recording_mbid')->first();
+            if ($current === null || $current->track_name !== $item->track_name
+                || $current->artist_name !== $item->artist_name || $current->release_name !== $item->release_name) {
+                throw ValidationException::withMessages(['recording_mbid' => 'This listen has changed, been identified, or deleted.']);
+            }
+            ProcessRecordingAssociation::enqueue($request->user(), $current, [
+                'type' => 'manual', 'match' => $match, 'recording_name' => $values['track_name'],
+            ]);
+        });
 
-        return to_route('listens.show', $item->id)->with('match_result', $count);
+        return to_route('listens.show', $item->id);
     }
 
     public function destroy(Request $request): RedirectResponse

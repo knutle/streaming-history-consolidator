@@ -2,6 +2,8 @@
 
 namespace Tests\Feature;
 
+use App\Http\Middleware\HandleInertiaRequests;
+use App\Jobs\ProcessRecordingAssociation;
 use App\Jobs\ScanArtistRecordings;
 use App\Models\Listen;
 use App\Models\User;
@@ -71,7 +73,13 @@ class MusicBrainzApiMatchingTest extends TestCase
         $this->post(route('listens.match', $listen->id), [
             'recording_mbid' => '22222222-2222-4222-8222-222222222222',
             'track_name' => 'Song', 'artist_name' => 'Artist', 'search_source' => 'api',
-        ])->assertSessionHas('match_result', 1);
+        ])->assertSessionHasNoErrors();
+        $this->assertNull($listen->fresh()->recording_mbid);
+        $this->artisan('queue:work', ['connection' => 'imports', '--once' => true])->assertSuccessful();
+        $run = DB::table('recording_association_runs')->sole();
+        $this->assertSame('completed', $run->status);
+        $this->assertSame(1, $run->matched);
+        app()->call([new ProcessRecordingAssociation($run->id), 'handle']);
         $this->assertSame('22222222-2222-4222-8222-222222222222', $listen->fresh()->recording_mbid);
         $this->assertSame(['11111111-1111-4111-8111-111111111111'], $listen->fresh()->track_metadata['additional_info']['artist_mbids']);
         $this->post(route('listens.import'), [
@@ -84,6 +92,36 @@ class MusicBrainzApiMatchingTest extends TestCase
         $this->assertSame('22222222-2222-4222-8222-222222222222', Listen::query()->latest('id')->firstOrFail()->recording_mbid);
         Http::assertSentCount(2);
         Sleep::assertSleptTimes(1);
+    }
+
+    public function test_recording_selection_is_queued_and_a_stale_choice_fails_without_overwriting(): void
+    {
+        Http::preventStrayRequests();
+        $listen = $this->importedListen();
+        Http::fake(['musicbrainz.org/ws/2/recording/*' => Http::response($this->recording())]);
+        $values = [
+            'recording_mbid' => $this->recording()['id'], 'track_name' => 'Song',
+            'artist_name' => 'Artist', 'search_source' => 'api',
+        ];
+        $this->post(route('listens.match', $listen->id), $values)->assertSessionHasNoErrors();
+        $this->assertNull($listen->fresh()->recording_mbid);
+        $run = DB::table('recording_association_runs')->sole();
+        $this->assertSame('queued', $run->status);
+        $this->assertDatabaseHas('jobs', ['queue' => 'imports']);
+        $this->post(route('listens.match', $listen->id), $values)->assertSessionHasErrors('recording_mbid');
+        $this->get(route('listens.show', ['listen' => $listen->id, 'search_source' => 'api']), [
+            'X-Inertia' => 'true', 'X-Inertia-Partial-Component' => 'listens/show',
+            'X-Inertia-Partial-Data' => 'recordingAssociation',
+            'X-Inertia-Version' => app(HandleInertiaRequests::class)->version(request()),
+        ])->assertOk()->assertJsonPath('props.recordingAssociation.status', 'queued');
+        Http::assertSentCount(2);
+        $listen->update(['recording_mbid' => '33333333-3333-4333-8333-333333333333']);
+        $this->artisan('queue:work', ['connection' => 'imports', '--once' => true, '--tries' => 1])
+            ->assertSuccessful();
+        $this->assertSame('33333333-3333-4333-8333-333333333333', $listen->fresh()->recording_mbid);
+        $this->assertDatabaseHas('recording_association_runs', [
+            'id' => $run->id, 'status' => 'failed', 'error' => 'This listen has changed or has already been identified.',
+        ]);
     }
 
     public function test_api_recording_suggestions_show_release_details_and_missing_metadata(): void
@@ -130,7 +168,8 @@ class MusicBrainzApiMatchingTest extends TestCase
         $this->post(route('listens.match', $listen->id), [
             'recording_mbid' => $recording['id'], 'track_name' => 'Song',
             'artist_name' => 'Credit alias & Guest credit', 'search_source' => 'api',
-        ])->assertSessionHas('match_result', 1);
+        ])->assertSessionHasNoErrors();
+        $this->processRecordingAssociation();
         $this->get(route('artists.show', '33333333-3333-4333-8333-333333333333'))
             ->assertOk()->assertInertia(fn (Assert $page) => $page->where('entity.name', 'Real guest')
             ->where('entity.nameSource', 'musicbrainz'));
