@@ -1,4 +1,11 @@
 import { Head, Link, useHttp, usePage, usePoll } from '@inertiajs/react';
+import {
+    ChevronDown,
+    ExternalLink,
+    Headphones,
+    Music2,
+    Search,
+} from 'lucide-react';
 import { useRef, useState } from 'react';
 import AlbumCover from '@/components/album-cover';
 import type { ArtworkProps } from '@/components/album-cover';
@@ -7,6 +14,11 @@ import DetailHeader from '@/components/detail-header';
 import Form from '@/components/form';
 import InputError from '@/components/input-error';
 import { Button } from '@/components/ui/button';
+import {
+    Collapsible,
+    CollapsibleContent,
+    CollapsibleTrigger,
+} from '@/components/ui/collapsible';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { show as albumShow } from '@/routes/albums';
@@ -221,6 +233,21 @@ export default function ListenDetails({
     artworkEnabled,
     artworkResult,
 }: Props) {
+    const [catalogDisclosure, setCatalogDisclosure] = useState({
+        listenId: listen.id,
+        rematching,
+        open: rematching,
+    });
+    const catalogExpanded =
+        catalogDisclosure.listenId === listen.id &&
+        catalogDisclosure.rematching === rematching
+            ? catalogDisclosure.open
+            : rematching;
+
+    function setCatalogExpanded(open: boolean) {
+        setCatalogDisclosure({ listenId: listen.id, rematching, open });
+    }
+
     const associationActive =
         recordingAssociation?.status === 'queued' ||
         recordingAssociation?.status === 'running';
@@ -747,9 +774,9 @@ export default function ListenDetails({
                         <>
                             <Form
                                 {...show.form(listen.id)}
-                                className="mt-4 flex flex-wrap items-end gap-2"
+                                className="mt-4 grid items-end gap-3 sm:grid-cols-[minmax(0,1fr)_auto]"
                             >
-                                <div className="grid gap-1">
+                                <div className="grid min-w-0 gap-2">
                                     <Label htmlFor="merge_q">
                                         Search your other catalog
                                     </Label>
@@ -837,400 +864,639 @@ export default function ListenDetails({
                         </p>
                     )}
                 </section>
-                <section className="rounded-xl border bg-card p-5 shadow-sm sm:p-6">
-                    <h2 className="text-lg font-semibold">Catalog matches</h2>
-                    <p className="mt-2 text-sm text-muted-foreground">
-                        Search a catalog, copy the track link, and confirm its
-                        metadata below. Imported track identifiers are matched
-                        locally; imports never contact external catalog APIs. An
-                        unambiguous catalog identifier from your other listens
-                        can also be linked through the same MusicBrainz
-                        recording. Manual choices are remembered for the same
-                        track, artist, and album. Catalog metadata is saved per
-                        track link; recording ISRCs are listed separately. The
-                        form can use linked track metadata when no match is
-                        already saved for this listen.
-                    </p>
-                    <p className="mt-2 text-sm text-muted-foreground">
-                        Spotify metadata lookup contacts Spotify only when you
-                        request it. Create an app in the{' '}
-                        <a
-                            href="https://developer.spotify.com/dashboard"
-                            target="_blank"
-                            rel="noreferrer"
-                            className="underline"
-                        >
-                            Spotify developer dashboard
-                        </a>{' '}
-                        and configure SPOTIFY_CLIENT_ID and
-                        SPOTIFY_CLIENT_SECRET in the server's .env file.
-                        SPOTIFY_MARKET is a two-letter country code and defaults
-                        to US. Spotify development-mode apps require the app
-                        owner to have Premium.
-                    </p>
-                    <div className="mt-3 flex flex-wrap gap-4 text-sm">
-                        {(['spotify', 'apple'] as const).map((provider) => {
-                            const current = catalogs[provider];
-                            const items = [
-                                ...(current ? [current] : []),
-                                ...linkedEvidence.filter(
-                                    (item) =>
-                                        item.provider === provider &&
-                                        item.id !== current?.id,
-                                ),
-                            ];
-                            const name =
-                                provider === 'spotify'
-                                    ? 'Spotify'
-                                    : 'Apple Music';
-                            return (
-                                <div key={provider} className="space-y-1">
-                                    <div className="flex gap-2">
-                                        <a
-                                            className="underline"
-                                            target="_blank"
-                                            rel="noreferrer"
-                                            href={
-                                                provider === 'spotify'
-                                                    ? `https://open.spotify.com/search/results/${musicSearch}`
-                                                    : `https://music.apple.com/us/search?term=${musicSearch}`
-                                            }
-                                        >
-                                            Search {name}
-                                        </a>
+                <Collapsible
+                    asChild
+                    open={catalogExpanded}
+                    onOpenChange={setCatalogExpanded}
+                >
+                    <section className="rounded-xl border bg-card p-5 shadow-sm sm:p-6">
+                        <div className="flex flex-wrap items-center justify-between gap-3">
+                            <div>
+                                <h2 className="text-lg font-semibold">
+                                    Catalog matches
+                                </h2>
+                                <p className="mt-1 text-sm text-muted-foreground">
+                                    Track references across your music catalogs.
+                                </p>
+                            </div>
+                            <CollapsibleTrigger asChild>
+                                <Button
+                                    type="button"
+                                    variant="outline"
+                                    size="sm"
+                                >
+                                    {catalogExpanded ? 'Collapse' : 'Expand'}
+                                    <ChevronDown
+                                        aria-hidden="true"
+                                        className={
+                                            catalogExpanded ? 'rotate-180' : ''
+                                        }
+                                    />
+                                    <span className="sr-only">
+                                        catalog matches
+                                    </span>
+                                </Button>
+                            </CollapsibleTrigger>
+                        </div>
+                        <div className="mt-4 divide-y rounded-lg border text-sm">
+                            {(['spotify', 'apple'] as const).map((provider) => {
+                                const current = catalogs[provider];
+                                const items = [
+                                    ...(current ? [current] : []),
+                                    ...linkedEvidence.filter(
+                                        (item) =>
+                                            item.provider === provider &&
+                                            item.id !== current?.id,
+                                    ),
+                                ];
+                                const name =
+                                    provider === 'spotify'
+                                        ? 'Spotify'
+                                        : 'Apple Music';
+                                const Icon =
+                                    provider === 'spotify'
+                                        ? Headphones
+                                        : Music2;
+                                return (
+                                    <div
+                                        key={provider}
+                                        className="grid gap-3 p-4 sm:grid-cols-[9rem_minmax(0,1fr)]"
+                                    >
+                                        <div className="flex items-start gap-3">
+                                            <span
+                                                className={`flex size-9 shrink-0 items-center justify-center rounded-lg ${provider === 'spotify' ? 'bg-emerald-100 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-400' : 'bg-rose-100 text-rose-700 dark:bg-rose-950 dark:text-rose-400'}`}
+                                            >
+                                                <Icon
+                                                    aria-hidden="true"
+                                                    className="size-4"
+                                                />
+                                            </span>
+                                            <div className="min-w-0">
+                                                <h3 className="font-medium">
+                                                    {name}
+                                                </h3>
+                                                <p className="text-xs text-muted-foreground">
+                                                    {items.length === 0
+                                                        ? 'Unmatched'
+                                                        : `${items.length} ${items.length === 1 ? 'match' : 'matches'}`}
+                                                </p>
+                                            </div>
+                                        </div>
+                                        <div className="min-w-0 space-y-3">
+                                            {items.length === 0 && (
+                                                <p className="text-muted-foreground">
+                                                    No catalog match saved.
+                                                </p>
+                                            )}
+                                            {items.map((item) => {
+                                                const details = [
+                                                    {
+                                                        label: 'Source',
+                                                        value: item.origin,
+                                                    },
+                                                    {
+                                                        label: 'Duration',
+                                                        value:
+                                                            item.duration_ms !=
+                                                            null
+                                                                ? `${item.duration_ms} ms`
+                                                                : null,
+                                                    },
+                                                    {
+                                                        label: 'ISRC',
+                                                        value: item.isrc,
+                                                    },
+                                                    {
+                                                        label: 'Album artist',
+                                                        value: item.album_artist,
+                                                    },
+                                                    {
+                                                        label: 'Genre',
+                                                        value: item.genre,
+                                                    },
+                                                    {
+                                                        label: 'Release date',
+                                                        value: item.release_date,
+                                                    },
+                                                    {
+                                                        label: 'Track',
+                                                        value: item.track_number,
+                                                    },
+                                                    {
+                                                        label: 'Disc',
+                                                        value: item.disc_number,
+                                                    },
+                                                ].filter(
+                                                    ({ value }) =>
+                                                        value != null &&
+                                                        value !== '',
+                                                );
+                                                return (
+                                                    <div
+                                                        key={item.id}
+                                                        className="space-y-1"
+                                                    >
+                                                        <a
+                                                            className="inline-flex max-w-full items-start gap-1.5 font-medium underline decoration-border underline-offset-4 hover:decoration-current"
+                                                            target="_blank"
+                                                            rel="noreferrer"
+                                                            href={catalogUrl(
+                                                                provider,
+                                                                item.id,
+                                                            )}
+                                                            aria-label={`Matched ${name} track: ${item.track_name}`}
+                                                        >
+                                                            <span className="min-w-0">
+                                                                {
+                                                                    item.track_name
+                                                                }
+                                                            </span>
+                                                            <ExternalLink
+                                                                aria-hidden="true"
+                                                                className="mt-0.5 size-3.5 shrink-0"
+                                                            />
+                                                        </a>
+                                                        <p className="text-muted-foreground">
+                                                            {item.artist_name}
+                                                            {item.release_name
+                                                                ? ` · ${item.release_name}`
+                                                                : ''}
+                                                        </p>
+                                                        {item.id !==
+                                                            current?.id && (
+                                                            <p className="text-xs text-muted-foreground">
+                                                                From linked
+                                                                listens
+                                                            </p>
+                                                        )}
+                                                        <dl
+                                                            hidden={
+                                                                !catalogExpanded
+                                                            }
+                                                            className="pt-2 text-xs text-muted-foreground"
+                                                        >
+                                                            {details.map(
+                                                                ({
+                                                                    label,
+                                                                    value,
+                                                                }) => (
+                                                                    <div
+                                                                        key={
+                                                                            label
+                                                                        }
+                                                                        className="grid grid-cols-[6rem_minmax(0,1fr)] gap-2 py-0.5"
+                                                                    >
+                                                                        <dt>
+                                                                            {
+                                                                                label
+                                                                            }
+                                                                        </dt>
+                                                                        <dd className="text-foreground">
+                                                                            {
+                                                                                value
+                                                                            }
+                                                                        </dd>
+                                                                    </div>
+                                                                ),
+                                                            )}
+                                                        </dl>
+                                                    </div>
+                                                );
+                                            })}
+                                            <div hidden={!catalogExpanded}>
+                                                <a
+                                                    className="inline-flex items-center gap-1.5 text-muted-foreground underline underline-offset-4 hover:text-foreground"
+                                                    target="_blank"
+                                                    rel="noreferrer"
+                                                    href={
+                                                        provider === 'spotify'
+                                                            ? `https://open.spotify.com/search/results/${musicSearch}`
+                                                            : `https://music.apple.com/us/search?term=${musicSearch}`
+                                                    }
+                                                >
+                                                    <Search
+                                                        aria-hidden="true"
+                                                        className="size-3.5"
+                                                    />
+                                                    Search {name}
+                                                </a>
+                                            </div>
+                                        </div>
                                     </div>
-                                    {items.map((item) => (
-                                        <div
-                                            key={item.id}
-                                            className="space-y-1 text-muted-foreground"
-                                        >
+                                );
+                            })}
+                        </div>
+                        <CollapsibleContent
+                            forceMount
+                            hidden={!catalogExpanded}
+                        >
+                            <div className="mt-5 border-t pt-5">
+                                <h3 className="font-medium">
+                                    Update catalog match
+                                </h3>
+                                <p className="mt-2 max-w-3xl text-sm text-muted-foreground">
+                                    Search a catalog, copy the track link, and
+                                    review its metadata below. Manual choices
+                                    are remembered for the same track, artist,
+                                    and album. The form can use linked track
+                                    metadata when no match is already saved for
+                                    this listen. Catalog metadata is saved per
+                                    track link; recording ISRCs are listed
+                                    separately.
+                                </p>
+                                <details className="mt-3 rounded-lg border bg-muted/30 p-3 text-sm text-muted-foreground">
+                                    <summary className="cursor-pointer font-medium text-foreground">
+                                        Catalog matching and Spotify lookup
+                                        setup
+                                    </summary>
+                                    <div className="mt-3 space-y-2">
+                                        <p>
+                                            Imported track identifiers are
+                                            matched locally; imports never
+                                            contact external catalog APIs. An
+                                            unambiguous catalog identifier from
+                                            your other listens can also be
+                                            linked through the same MusicBrainz
+                                            recording.
+                                        </p>
+                                        <p>
+                                            Spotify metadata lookup contacts
+                                            Spotify only when you request it.
+                                            Create an app in the{' '}
                                             <a
-                                                className="text-foreground underline"
+                                                href="https://developer.spotify.com/dashboard"
                                                 target="_blank"
                                                 rel="noreferrer"
-                                                href={catalogUrl(
-                                                    provider,
-                                                    item.id,
-                                                )}
+                                                className="underline"
                                             >
-                                                Matched {name} track
-                                            </a>
-                                            <p>
-                                                {item.track_name} ·{' '}
-                                                {item.artist_name}
-                                                {item.release_name
-                                                    ? ` · ${item.release_name}`
-                                                    : ''}{' '}
-                                                ({item.origin})
-                                            </p>
-                                            {item.duration_ms != null && (
-                                                <p>
-                                                    Duration: {item.duration_ms}{' '}
-                                                    ms
-                                                </p>
-                                            )}
-                                            {item.isrc && (
-                                                <p>ISRC: {item.isrc}</p>
-                                            )}
-                                            {item.album_artist && (
-                                                <p>
-                                                    Album artist:{' '}
-                                                    {item.album_artist}
-                                                </p>
-                                            )}
-                                            {item.genre && (
-                                                <p>Genre: {item.genre}</p>
-                                            )}
-                                            {item.release_date && (
-                                                <p>
-                                                    Release date:{' '}
-                                                    {item.release_date}
-                                                </p>
-                                            )}
-                                            {item.track_number && (
-                                                <p>
-                                                    Track: {item.track_number}
-                                                </p>
-                                            )}
-                                            {item.disc_number && (
-                                                <p>Disc: {item.disc_number}</p>
-                                            )}
-                                        </div>
-                                    ))}
-                                </div>
-                            );
-                        })}
-                    </div>
-                    <Form
-                        {...catalog.form(listen.id)}
-                        className="mt-4 grid gap-3 sm:grid-cols-2"
-                    >
-                        {({ errors, processing, clearErrors }) => (
-                            <>
-                                <div className="grid gap-2">
-                                    <Label htmlFor="catalog-provider">
-                                        Catalog
-                                    </Label>
-                                    <select
-                                        id="catalog-provider"
-                                        name="provider"
-                                        className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-                                        value={selectedCatalog}
-                                        disabled={lookup.processing}
-                                        onChange={(event) => {
-                                            setSelectedCatalog(
-                                                event.target.value === 'spotify'
-                                                    ? 'spotify'
-                                                    : 'apple',
-                                            );
-                                            clearErrors();
-                                            setLookupError(null);
-                                            setSpotifySource(null);
-                                        }}
-                                    >
-                                        <option value="apple">
-                                            Apple Music
-                                        </option>
-                                        <option value="spotify">Spotify</option>
-                                    </select>
-                                    <InputError message={errors.provider} />
-                                </div>
-                                {chooseLinked && (
-                                    <div className="grid gap-2">
-                                        <Label htmlFor="linked-catalog-track">
-                                            Linked track to prefill
-                                        </Label>
-                                        <select
-                                            id="linked-catalog-track"
-                                            className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-                                            value={selectedLinked?.id ?? ''}
-                                            disabled={lookup.processing}
-                                            onChange={(event) => {
-                                                setSelectedLinkedCatalog({
-                                                    listenId: listen.id,
-                                                    provider: selectedCatalog,
-                                                    id: event.target.value,
-                                                });
-                                                setLookupError(null);
-                                                setSpotifySource(null);
-                                            }}
-                                        >
-                                            <option value="">
-                                                Choose a linked track
-                                            </option>
-                                            {linkedMatches.map((item) => (
-                                                <option
-                                                    key={item.id}
-                                                    value={item.id}
-                                                >
-                                                    {item.track_name} ·{' '}
-                                                    {item.artist_name} ·{' '}
-                                                    {item.id}
-                                                </option>
-                                            ))}
-                                        </select>
+                                                Spotify developer dashboard
+                                            </a>{' '}
+                                            and configure SPOTIFY_CLIENT_ID and
+                                            SPOTIFY_CLIENT_SECRET in the
+                                            server's .env file. SPOTIFY_MARKET
+                                            is a two-letter country code and
+                                            defaults to US. Spotify
+                                            development-mode apps require the
+                                            app owner to have Premium.
+                                        </p>
                                     </div>
-                                )}
-                                <div className="grid gap-2">
-                                    <Label htmlFor="catalog-url">
-                                        Track link
-                                    </Label>
-                                    <Input
-                                        key={inputKey}
-                                        ref={catalogUrlInput}
-                                        id="catalog-url"
-                                        name="catalog_url"
-                                        defaultValue={
-                                            catalogMatch
-                                                ? catalogUrl(
-                                                      selectedCatalog,
-                                                      catalogMatch.id,
-                                                  )
-                                                : ''
-                                        }
-                                        required
-                                        maxLength={2048}
-                                        readOnly={lookup.processing}
-                                        onChange={() => {
-                                            setLookupError(null);
-                                            setSpotifySource(null);
-                                        }}
-                                    />
-                                    <InputError message={errors.catalog_url} />
-                                    {selectedCatalog === 'spotify' && (
+                                </details>
+                                <Form
+                                    {...catalog.form(listen.id)}
+                                    onError={() => setCatalogExpanded(true)}
+                                    className="mt-4 grid items-start gap-4 sm:grid-cols-2"
+                                >
+                                    {({ errors, processing, clearErrors }) => (
                                         <>
-                                            <div>
-                                                <Button
-                                                    type="button"
-                                                    variant="outline"
-                                                    disabled={
-                                                        lookup.processing ||
-                                                        processing ||
-                                                        associationActive
+                                            <div className="grid items-start gap-4 sm:col-span-2 sm:grid-cols-2">
+                                                <div className="grid min-w-0 gap-2">
+                                                    <Label htmlFor="catalog-provider">
+                                                        Catalog
+                                                    </Label>
+                                                    <select
+                                                        id="catalog-provider"
+                                                        name="provider"
+                                                        className="h-9 w-full min-w-0 rounded-md border border-input bg-background px-3 text-sm"
+                                                        value={selectedCatalog}
+                                                        disabled={
+                                                            lookup.processing
+                                                        }
+                                                        onChange={(event) => {
+                                                            setSelectedCatalog(
+                                                                event.target
+                                                                    .value ===
+                                                                    'spotify'
+                                                                    ? 'spotify'
+                                                                    : 'apple',
+                                                            );
+                                                            clearErrors();
+                                                            setLookupError(
+                                                                null,
+                                                            );
+                                                            setSpotifySource(
+                                                                null,
+                                                            );
+                                                        }}
+                                                    >
+                                                        <option value="apple">
+                                                            Apple Music
+                                                        </option>
+                                                        <option value="spotify">
+                                                            Spotify
+                                                        </option>
+                                                    </select>
+                                                    <InputError
+                                                        message={
+                                                            errors.provider
+                                                        }
+                                                    />
+                                                </div>
+                                                {chooseLinked && (
+                                                    <div className="grid min-w-0 gap-2">
+                                                        <Label htmlFor="linked-catalog-track">
+                                                            Linked track to
+                                                            prefill
+                                                        </Label>
+                                                        <select
+                                                            id="linked-catalog-track"
+                                                            className="h-9 w-full min-w-0 rounded-md border border-input bg-background px-3 text-sm"
+                                                            value={
+                                                                selectedLinked?.id ??
+                                                                ''
+                                                            }
+                                                            disabled={
+                                                                lookup.processing
+                                                            }
+                                                            onChange={(
+                                                                event,
+                                                            ) => {
+                                                                setSelectedLinkedCatalog(
+                                                                    {
+                                                                        listenId:
+                                                                            listen.id,
+                                                                        provider:
+                                                                            selectedCatalog,
+                                                                        id: event
+                                                                            .target
+                                                                            .value,
+                                                                    },
+                                                                );
+                                                                setLookupError(
+                                                                    null,
+                                                                );
+                                                                setSpotifySource(
+                                                                    null,
+                                                                );
+                                                            }}
+                                                        >
+                                                            <option value="">
+                                                                Choose a linked
+                                                                track
+                                                            </option>
+                                                            {linkedMatches.map(
+                                                                (item) => (
+                                                                    <option
+                                                                        key={
+                                                                            item.id
+                                                                        }
+                                                                        value={
+                                                                            item.id
+                                                                        }
+                                                                    >
+                                                                        {
+                                                                            item.track_name
+                                                                        }{' '}
+                                                                        ·{' '}
+                                                                        {
+                                                                            item.artist_name
+                                                                        }{' '}
+                                                                        ·{' '}
+                                                                        {
+                                                                            item.id
+                                                                        }
+                                                                    </option>
+                                                                ),
+                                                            )}
+                                                        </select>
+                                                    </div>
+                                                )}
+                                            </div>
+                                            <div className="grid min-w-0 gap-2 sm:col-span-2">
+                                                <Label htmlFor="catalog-url">
+                                                    Track link
+                                                </Label>
+                                                <Input
+                                                    key={inputKey}
+                                                    ref={catalogUrlInput}
+                                                    id="catalog-url"
+                                                    name="catalog_url"
+                                                    defaultValue={
+                                                        catalogMatch
+                                                            ? catalogUrl(
+                                                                  selectedCatalog,
+                                                                  catalogMatch.id,
+                                                              )
+                                                            : ''
                                                     }
-                                                    onClick={() =>
-                                                        void lookupSpotify()
+                                                    required
+                                                    maxLength={2048}
+                                                    readOnly={lookup.processing}
+                                                    onChange={() => {
+                                                        setLookupError(null);
+                                                        setSpotifySource(null);
+                                                    }}
+                                                />
+                                                <InputError
+                                                    message={errors.catalog_url}
+                                                />
+                                                {selectedCatalog ===
+                                                    'spotify' && (
+                                                    <>
+                                                        <p className="text-sm text-muted-foreground">
+                                                            Retrieving metadata
+                                                            sends this track
+                                                            link to Spotify only
+                                                            when requested.
+                                                        </p>
+                                                        <div>
+                                                            <Button
+                                                                type="button"
+                                                                variant="outline"
+                                                                disabled={
+                                                                    lookup.processing ||
+                                                                    processing ||
+                                                                    associationActive
+                                                                }
+                                                                onClick={() =>
+                                                                    void lookupSpotify()
+                                                                }
+                                                            >
+                                                                {lookup.processing
+                                                                    ? 'Retrieving metadata...'
+                                                                    : 'Retrieve Spotify metadata'}
+                                                            </Button>
+                                                        </div>
+                                                        <InputError
+                                                            message={
+                                                                lookupError?.listenId ===
+                                                                listen.id
+                                                                    ? lookupError.message
+                                                                    : ''
+                                                            }
+                                                        />
+                                                        {spotifySource?.listenId ===
+                                                            listen.id && (
+                                                            <p className="text-sm text-muted-foreground">
+                                                                Metadata
+                                                                supplied by{' '}
+                                                                <a
+                                                                    href={
+                                                                        spotifySource.url
+                                                                    }
+                                                                    target="_blank"
+                                                                    rel="noreferrer"
+                                                                    className="underline"
+                                                                >
+                                                                    Spotify
+                                                                </a>
+                                                                . Review and
+                                                                save the match
+                                                                below.
+                                                            </p>
+                                                        )}
+                                                    </>
+                                                )}
+                                            </div>
+                                            <div className="grid min-w-0 gap-2">
+                                                <Label htmlFor="catalog-track">
+                                                    Catalog track name
+                                                </Label>
+                                                <Input
+                                                    key={inputKey}
+                                                    ref={trackInput}
+                                                    id="catalog-track"
+                                                    name="catalog_track"
+                                                    defaultValue={
+                                                        catalogMatch?.track_name ??
+                                                        listen.track_name
+                                                    }
+                                                    required
+                                                    maxLength={255}
+                                                    readOnly={lookup.processing}
+                                                />
+                                                <InputError
+                                                    message={
+                                                        errors.catalog_track
+                                                    }
+                                                />
+                                            </div>
+                                            <div className="grid min-w-0 gap-2">
+                                                <Label htmlFor="catalog-artist">
+                                                    Catalog artist
+                                                </Label>
+                                                <Input
+                                                    key={inputKey}
+                                                    ref={artistInput}
+                                                    id="catalog-artist"
+                                                    name="catalog_artist"
+                                                    defaultValue={
+                                                        catalogMatch?.artist_name ??
+                                                        (listen.artist_name ===
+                                                        'Unknown artist'
+                                                            ? ''
+                                                            : listen.artist_name)
+                                                    }
+                                                    required
+                                                    maxLength={255}
+                                                    readOnly={lookup.processing}
+                                                />
+                                                <InputError
+                                                    message={
+                                                        errors.catalog_artist
+                                                    }
+                                                />
+                                            </div>
+                                            <div className="grid min-w-0 gap-2">
+                                                <Label htmlFor="catalog-album">
+                                                    Catalog album
+                                                </Label>
+                                                <Input
+                                                    key={inputKey}
+                                                    ref={albumInput}
+                                                    id="catalog-album"
+                                                    name="catalog_album"
+                                                    defaultValue={
+                                                        catalogMatch
+                                                            ? (catalogMatch.release_name ??
+                                                              '')
+                                                            : (listen.release_name ??
+                                                              '')
+                                                    }
+                                                    maxLength={255}
+                                                    readOnly={lookup.processing}
+                                                />
+                                                <InputError
+                                                    message={
+                                                        errors.catalog_album
+                                                    }
+                                                />
+                                            </div>
+                                            <div className="grid min-w-0 gap-2">
+                                                <Label htmlFor="catalog-isrc">
+                                                    Catalog ISRC (optional)
+                                                </Label>
+                                                <Input
+                                                    key={inputKey}
+                                                    ref={isrcInput}
+                                                    id="catalog-isrc"
+                                                    name="catalog_isrc"
+                                                    defaultValue={
+                                                        catalogMatch?.isrc ?? ''
+                                                    }
+                                                    maxLength={15}
+                                                    placeholder="USABC2412345"
+                                                    readOnly={lookup.processing}
+                                                />
+                                                <InputError
+                                                    message={
+                                                        errors.catalog_isrc
+                                                    }
+                                                />
+                                            </div>
+                                            <div className="grid min-w-0 gap-2">
+                                                <Label htmlFor="catalog-duration">
+                                                    Track duration
+                                                    (milliseconds)
+                                                </Label>
+                                                <Input
+                                                    key={inputKey}
+                                                    ref={durationInput}
+                                                    id="catalog-duration"
+                                                    name="catalog_duration"
+                                                    type="number"
+                                                    min={1}
+                                                    max={86400000}
+                                                    defaultValue={
+                                                        catalogMatch
+                                                            ? (catalogMatch.duration_ms ??
+                                                              '')
+                                                            : (info.duration_ms ??
+                                                              '')
+                                                    }
+                                                    readOnly={lookup.processing}
+                                                />
+                                                <InputError
+                                                    message={
+                                                        errors.catalog_duration
+                                                    }
+                                                />
+                                            </div>
+                                            <div className="border-t pt-4 sm:col-span-2">
+                                                <Button
+                                                    className="w-full sm:w-auto"
+                                                    disabled={
+                                                        processing ||
+                                                        lookup.processing
                                                     }
                                                 >
-                                                    {lookup.processing
-                                                        ? 'Retrieving metadata...'
-                                                        : 'Retrieve Spotify metadata'}
+                                                    Save catalog match
                                                 </Button>
                                             </div>
-                                            <InputError
-                                                message={
-                                                    lookupError?.listenId ===
-                                                    listen.id
-                                                        ? lookupError.message
-                                                        : ''
-                                                }
-                                            />
-                                            {spotifySource?.listenId ===
-                                                listen.id && (
-                                                <p className="text-sm text-muted-foreground">
-                                                    Metadata supplied by{' '}
-                                                    <a
-                                                        href={spotifySource.url}
-                                                        target="_blank"
-                                                        rel="noreferrer"
-                                                        className="underline"
-                                                    >
-                                                        Spotify
-                                                    </a>
-                                                    . Review and save the match
-                                                    below.
-                                                </p>
-                                            )}
                                         </>
                                     )}
-                                </div>
-                                <div className="grid gap-2">
-                                    <Label htmlFor="catalog-track">
-                                        Catalog track name
-                                    </Label>
-                                    <Input
-                                        key={inputKey}
-                                        ref={trackInput}
-                                        id="catalog-track"
-                                        name="catalog_track"
-                                        defaultValue={
-                                            catalogMatch?.track_name ??
-                                            listen.track_name
-                                        }
-                                        required
-                                        maxLength={255}
-                                        readOnly={lookup.processing}
-                                    />
-                                    <InputError
-                                        message={errors.catalog_track}
-                                    />
-                                </div>
-                                <div className="grid gap-2">
-                                    <Label htmlFor="catalog-artist">
-                                        Catalog artist
-                                    </Label>
-                                    <Input
-                                        key={inputKey}
-                                        ref={artistInput}
-                                        id="catalog-artist"
-                                        name="catalog_artist"
-                                        defaultValue={
-                                            catalogMatch?.artist_name ??
-                                            (listen.artist_name ===
-                                            'Unknown artist'
-                                                ? ''
-                                                : listen.artist_name)
-                                        }
-                                        required
-                                        maxLength={255}
-                                        readOnly={lookup.processing}
-                                    />
-                                    <InputError
-                                        message={errors.catalog_artist}
-                                    />
-                                </div>
-                                <div className="grid gap-2">
-                                    <Label htmlFor="catalog-album">
-                                        Catalog album
-                                    </Label>
-                                    <Input
-                                        key={inputKey}
-                                        ref={albumInput}
-                                        id="catalog-album"
-                                        name="catalog_album"
-                                        defaultValue={
-                                            catalogMatch
-                                                ? (catalogMatch.release_name ??
-                                                  '')
-                                                : (listen.release_name ?? '')
-                                        }
-                                        maxLength={255}
-                                        readOnly={lookup.processing}
-                                    />
-                                    <InputError
-                                        message={errors.catalog_album}
-                                    />
-                                </div>
-                                <div className="grid gap-2">
-                                    <Label htmlFor="catalog-isrc">
-                                        Catalog ISRC (optional)
-                                    </Label>
-                                    <Input
-                                        key={inputKey}
-                                        ref={isrcInput}
-                                        id="catalog-isrc"
-                                        name="catalog_isrc"
-                                        defaultValue={catalogMatch?.isrc ?? ''}
-                                        maxLength={15}
-                                        placeholder="USABC2412345"
-                                        readOnly={lookup.processing}
-                                    />
-                                    <InputError message={errors.catalog_isrc} />
-                                </div>
-                                <div className="grid gap-2">
-                                    <Label htmlFor="catalog-duration">
-                                        Track duration (milliseconds)
-                                    </Label>
-                                    <Input
-                                        key={inputKey}
-                                        ref={durationInput}
-                                        id="catalog-duration"
-                                        name="catalog_duration"
-                                        type="number"
-                                        min={1}
-                                        max={86400000}
-                                        defaultValue={
-                                            catalogMatch
-                                                ? (catalogMatch.duration_ms ??
-                                                  '')
-                                                : (info.duration_ms ?? '')
-                                        }
-                                        readOnly={lookup.processing}
-                                    />
-                                    <InputError
-                                        message={errors.catalog_duration}
-                                    />
-                                </div>
-                                <div>
-                                    <Button
-                                        disabled={
-                                            processing || lookup.processing
-                                        }
-                                    >
-                                        Save catalog match
-                                    </Button>
-                                </div>
-                            </>
-                        )}
-                    </Form>
-                    {(listen.artist_name === 'Unknown artist' ||
-                        !listen.release_name) && (
-                        <p className="mt-3 text-sm text-muted-foreground">
-                            This listen lacks an artist or album, so this choice
-                            will apply only to this listen.
-                        </p>
-                    )}
-                </section>
+                                </Form>
+                                {(listen.artist_name === 'Unknown artist' ||
+                                    !listen.release_name) && (
+                                    <p className="mt-3 text-sm text-muted-foreground">
+                                        This listen lacks an artist or album, so
+                                        this choice will apply only to this
+                                        listen.
+                                    </p>
+                                )}
+                            </div>
+                        </CollapsibleContent>
+                    </section>
+                </Collapsible>
                 {listen.recording_mbid !== null && !rematching && (
                     <section className="rounded-xl border bg-card p-5 shadow-sm sm:p-6">
                         <h2 className="text-lg font-semibold">
@@ -1322,7 +1588,7 @@ export default function ListenDetails({
                             </p>
                             <Form
                                 {...show.form(listen.id)}
-                                className="mt-4 flex flex-wrap items-end gap-3"
+                                className="mt-4 grid items-end gap-3 sm:grid-cols-2 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(0,1fr)_auto]"
                             >
                                 {rematching && (
                                     <input
@@ -1331,10 +1597,9 @@ export default function ListenDetails({
                                         value="1"
                                     />
                                 )}
-                                <div className="grid flex-1 gap-2">
+                                <div className="grid min-w-0 gap-2">
                                     <Label htmlFor="recording-search">
-                                        Recording name (local search is
-                                        case-sensitive and matches the start)
+                                        Recording name
                                     </Label>
                                     <Input
                                         ref={recordingSearchInput}
@@ -1343,9 +1608,10 @@ export default function ListenDetails({
                                         defaultValue={search}
                                         maxLength={255}
                                         required
+                                        aria-describedby="recording-search-help"
                                     />
                                 </div>
-                                <div className="grid flex-1 gap-2">
+                                <div className="grid min-w-0 gap-2">
                                     <Label htmlFor="artist-search">
                                         Artist contains (optional)
                                     </Label>
@@ -1356,7 +1622,7 @@ export default function ListenDetails({
                                         maxLength={255}
                                     />
                                 </div>
-                                <div className="grid gap-2">
+                                <div className="grid min-w-0 gap-2">
                                     <Label htmlFor="recording-source">
                                         Search source
                                     </Label>
@@ -1381,7 +1647,7 @@ export default function ListenDetails({
                                                 input.value = listen.track_name;
                                             }
                                         }}
-                                        className="h-9 rounded-md border bg-background px-3 text-sm"
+                                        className="h-9 w-full min-w-0 rounded-md border border-input bg-background px-3 text-sm"
                                     >
                                         <option value="local">
                                             Local MusicBrainz database
@@ -1393,6 +1659,13 @@ export default function ListenDetails({
                                 </div>
                                 <Button>Search</Button>
                             </Form>
+                            <p
+                                id="recording-search-help"
+                                className="mt-2 text-sm text-muted-foreground"
+                            >
+                                Local recording search is case-sensitive and
+                                matches the start of the name.
+                            </p>
                             <InputError
                                 className="mt-2"
                                 message={
