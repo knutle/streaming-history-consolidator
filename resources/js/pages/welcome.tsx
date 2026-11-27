@@ -11,6 +11,7 @@ import {
     ShieldCheck,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { appName } from '@/lib/app-name';
 import { dashboard, login, register } from '@/routes';
 
 const features = [
@@ -51,7 +52,7 @@ export default function Welcome() {
                     <div className="mx-auto flex max-w-6xl items-center justify-between gap-4 px-5 py-5 sm:px-8">
                         <a
                             href="#top"
-                            aria-label="Streaming History Consolidator"
+                            aria-label={appName}
                             className="flex items-center gap-2 font-semibold tracking-tight"
                         >
                             <span className="flex size-9 items-center justify-center rounded-lg bg-emerald-700 text-white dark:bg-emerald-500 dark:text-emerald-950">
@@ -61,9 +62,7 @@ export default function Welcome() {
                                 />
                             </span>
                             <span className="sm:hidden">History</span>
-                            <span className="hidden sm:inline">
-                                Streaming History Consolidator
-                            </span>
+                            <span className="hidden sm:inline">{appName}</span>
                         </a>
                         <nav
                             aria-label="Account"
@@ -371,7 +370,7 @@ export default function Welcome() {
                 </main>
                 <footer className="border-t">
                     <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-3 px-5 py-6 text-sm text-muted-foreground sm:px-8">
-                        <p>Streaming History Consolidator</p>
+                        <p>{appName}</p>
                         <a
                             href="#guide"
                             className="underline underline-offset-4"
