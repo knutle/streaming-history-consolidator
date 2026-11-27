@@ -19,6 +19,8 @@ You do not need to provide your Spotify or Apple Music password. Listening histo
 2. Create an account, verify your email, and upload the supported files from the Imports page.
 3. Follow import progress, then browse your listening history and review recording matches.
 
+On a matched listen's detail page, use **Re-match recording** to search the local database or explicitly search the MusicBrainz API for a replacement. Confirming replaces the recording for your same-track/artist listens and linked catalog tracks, and remembers the choice for future imports. The current match remains until the queued replacement succeeds. If an affected listen, saved recording choice, or linked group conflicts, the entire replacement is rolled back and the detail page reports the conflict. Individual plays, imported names, catalog evidence, and separately saved artist/album choices are preserved.
+
 Re-imports skip previously imported events and can help identify unmatched listens. Spotify library or playlist JSON files can accompany history exports to help identify missing track URLs; Spotify's shorter `StreamingHistory_music` files are not supported.
 
 ## Local development

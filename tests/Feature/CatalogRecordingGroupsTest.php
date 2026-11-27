@@ -7,11 +7,13 @@ use App\Models\User;
 use App\Services\CatalogMatcher;
 use App\Services\CatalogRecordingGroups;
 use App\Services\ManualListenMatcher;
+use App\Services\ManualMusicEntityMatcher;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
 use Inertia\Testing\AssertableInertia as Assert;
+use PHPUnit\Framework\Attributes\TestWith;
 use Tests\TestCase;
 
 class CatalogRecordingGroupsTest extends TestCase
@@ -267,6 +269,105 @@ class CatalogRecordingGroupsTest extends TestCase
         $this->assertDatabaseCount('catalog_recording_groups', 0);
         $this->assertSame($mbid, $spotify->fresh()->recording_mbid);
         Http::assertNothingSent();
+    }
+
+    public function test_rematching_updates_linked_catalogs_and_future_choices_without_touching_other_recording_groups(): void
+    {
+        Http::preventStrayRequests();
+        $user = User::factory()->create();
+        $old = '11111111-1111-4111-8111-111111111111';
+        $new = '22222222-2222-4222-8222-222222222222';
+        $album = '33333333-3333-4333-8333-333333333333';
+        $apple = $this->listen($user, 'apple', '123', 'Original', 1, $old);
+        $spotify = $this->listen($user, 'spotify', '0123456789ABCDEFGHIJKL', 'Variant', 2);
+        $this->actingAs($user)->post(route('listens.merge', $apple->id), ['other_listen' => $spotify->id])->assertSessionHasNoErrors();
+        $sameSong = $this->listen($user, 'apple', '456', ' ORIGINAL ', 3, $old);
+        $unmatched = $this->listen($user, 'spotify', '0123456789ABCDEFGHIJKL', 'Another spelling', 4);
+        $unrelated = $this->listen($user, 'apple', '789', 'Unrelated', 5, $old);
+        $foreign = $this->listen(User::factory()->create(), 'apple', '123', 'Original', 6, $old);
+        app(ManualMusicEntityMatcher::class)->remember($user, $apple, 'album', [
+            'mbid' => $album, 'name' => 'Chosen album', 'source' => 'musicbrainz',
+        ]);
+        $evidence = $apple->fresh()->track_metadata['additional_info']['catalogs'];
+        Http::fake(['musicbrainz.org/ws/2/recording/*' => Http::response([
+            'id' => $new, 'title' => 'Replacement',
+            'artist-credit' => [['name' => 'Artist', 'artist' => ['id' => $old, 'name' => 'Artist']]],
+        ])]);
+
+        $this->post(route('listens.match', $apple->id), [
+            'recording_mbid' => $new, 'expected_recording_mbid' => $old,
+            'track_name' => 'Replacement', 'artist_name' => 'Artist', 'search_source' => 'api',
+        ])->assertSessionHasNoErrors();
+        $this->processRecordingAssociation();
+
+        foreach ([$apple, $spotify, $sameSong, $unmatched] as $listen) {
+            $this->assertSame($new, $listen->fresh()->recording_mbid);
+            $this->assertSame($album, $listen->fresh()->track_metadata['additional_info']['release_mbid']);
+        }
+        $this->assertSame($old, $unrelated->fresh()->recording_mbid);
+        $this->assertSame($old, $foreign->fresh()->recording_mbid);
+        $this->assertSame($evidence, $apple->fresh()->track_metadata['additional_info']['catalogs']);
+        $this->assertDatabaseHas('recording_association_runs', ['status' => 'completed', 'matched' => 4]);
+        $group = json_decode(DB::table('catalog_recording_groups')->sole()->recording_match, true, 512, JSON_THROW_ON_ERROR);
+        $this->assertSame($new, $group['recording_mbid']);
+        $this->assertSame($new, app(ManualListenMatcher::class)->remembered($user, 'Variant', 'Artist')['recording_mbid']);
+        $row = ['ts' => '2024-01-01T12:00:00Z', 'ms_played' => 60000,
+            'master_metadata_track_name' => 'Variant', 'master_metadata_album_artist_name' => 'Artist',
+            'master_metadata_album_album_name' => 'Album', 'spotify_track_uri' => 'spotify:track:0123456789ABCDEFGHIJKL'];
+        $this->post(route('listens.import'), ['source' => 'spotify',
+            'file' => UploadedFile::fake()->createWithContent('history.json', json_encode([$row], JSON_THROW_ON_ERROR))])
+            ->assertSessionHas('import_result', ['imported' => 1, 'duplicates' => 0, 'matched' => 1]);
+        $this->assertSame($new, Listen::query()->latest('id')->firstOrFail()->recording_mbid);
+        Http::assertSentCount(1);
+    }
+
+    #[TestWith(['listen'])]
+    #[TestWith(['saved song'])]
+    #[TestWith(['saved group'])]
+    public function test_rematching_conflicts_roll_back_all_listens_and_saved_choices(string $conflict): void
+    {
+        Http::preventStrayRequests();
+        $user = User::factory()->create();
+        $old = '11111111-1111-4111-8111-111111111111';
+        $new = '22222222-2222-4222-8222-222222222222';
+        $conflicting = '33333333-3333-4333-8333-333333333333';
+        $apple = $this->listen($user, 'apple', '123', 'Original', 1, $old);
+        $spotify = $this->listen($user, 'spotify', '0123456789ABCDEFGHIJKL', 'Variant', 2);
+        $this->actingAs($user)->post(route('listens.merge', $apple->id), ['other_listen' => $spotify->id])->assertSessionHasNoErrors();
+        if ($conflict === 'listen') {
+            $spotify->update(['recording_mbid' => $conflicting]);
+        } elseif ($conflict === 'saved song') {
+            DB::table('listen_matches')->insert([
+                'user_id' => $user->id, 'song_key' => app(ManualListenMatcher::class)->key('Variant', 'Artist'),
+                'match' => json_encode(['recording_mbid' => $conflicting], JSON_THROW_ON_ERROR),
+                'created_at' => now(), 'updated_at' => now(),
+            ]);
+        } else {
+            DB::table('catalog_recording_groups')->update(['recording_match' => json_encode(['recording_mbid' => $conflicting], JSON_THROW_ON_ERROR)]);
+        }
+        $metadata = $apple->fresh()->track_metadata;
+        $groupChoice = DB::table('catalog_recording_groups')->sole()->recording_match;
+        Http::fake(['musicbrainz.org/ws/2/recording/*' => Http::response([
+            'id' => $new, 'title' => 'Replacement',
+            'artist-credit' => [['name' => 'Artist', 'artist' => ['id' => $old]]],
+        ])]);
+
+        $this->post(route('listens.match', $apple->id), [
+            'recording_mbid' => $new, 'expected_recording_mbid' => $old,
+            'track_name' => 'Replacement', 'artist_name' => 'Artist', 'search_source' => 'api',
+        ])->assertSessionHasNoErrors();
+        $this->artisan('queue:work', ['connection' => 'imports', '--once' => true, '--tries' => 1])->assertSuccessful();
+
+        $this->assertSame($old, $apple->fresh()->recording_mbid);
+        $this->assertSame($conflict === 'listen' ? $conflicting : $old, $spotify->fresh()->recording_mbid);
+        $this->assertSame($metadata, $apple->fresh()->track_metadata);
+        $this->assertSame($groupChoice, DB::table('catalog_recording_groups')->sole()->recording_match);
+        $this->assertDatabaseCount('listen_matches', $conflict === 'saved song' ? 1 : 0);
+        $run = DB::table('recording_association_runs')->sole();
+        $this->assertSame('failed', $run->status);
+        $this->assertStringContainsString('conflicting', $run->error);
+        $this->assertStringContainsString('No matches were changed.', $run->error);
+        Http::assertSentCount(1);
     }
 
     public function test_conflicting_saved_recording_aborts_import_instead_of_overriding_group(): void

@@ -641,6 +641,95 @@ class ListenImportTest extends TestCase
         $this->assertSame(1, DB::table('listen_releases')->where('listen_id', $listen->id)->count());
     }
 
+    public function test_rematching_rebuilds_metadata_for_own_song_group_and_remembers_the_replacement(): void
+    {
+        Http::preventStrayRequests();
+        $this->musicbrainz();
+        $db = DB::connection('musicbrainz');
+        $newRecording = '44444444-4444-4444-8444-444444444444';
+        $newArtist = '55555555-5555-4555-8555-555555555555';
+        $newRelease = '66666666-6666-4666-8666-666666666666';
+        $db->table('artist_credit')->insert(['id' => 2, 'name' => 'New artist']);
+        $db->table('artist')->insert(['id' => 2, 'gid' => $newArtist, 'name' => 'New artist']);
+        $db->table('artist_credit_name')->insert(['artist_credit' => 2, 'artist' => 2, 'position' => 0]);
+        $db->table('recording')->insert(['id' => 2, 'gid' => $newRecording, 'name' => 'Replacement', 'artist_credit' => 2]);
+        $db->table('release')->insert(['id' => 2, 'gid' => $newRelease, 'name' => 'Album', 'artist_credit' => 2]);
+        $db->table('medium')->insert(['id' => 2, 'release' => 2]);
+        $db->table('track')->insert(['recording' => 2, 'medium' => 2]);
+        $user = User::factory()->create();
+        $this->actingAs($user)->post(route('listens.import'), [
+            'source' => 'spotify', 'file' => $this->spotify([
+                $this->row('2024-01-01T12:00:00Z'), $this->row('2024-01-02T12:00:00Z'),
+            ]),
+        ])->assertSessionHasNoErrors();
+        $listen = Listen::query()->oldest('id')->firstOrFail();
+        $fingerprint = $listen->fingerprint;
+        $oldRecording = $listen->recording_mbid;
+        $other = User::factory()->create();
+        $this->actingAs($other)->post(route('listens.import'), [
+            'source' => 'spotify', 'file' => $this->spotify([$this->row('2024-01-01T12:00:00Z')]),
+        ])->assertSessionHasNoErrors();
+        $this->actingAs($user)->get(route('listens.show', $listen->id))
+            ->assertInertia(fn (Assert $page) => $page->where('rematching', false)->has('suggestions', 0));
+        $this->get(route('listens.show', ['listen' => $listen->id, 'q' => 'Replacement', 'rematch' => 1]))
+            ->assertInertia(fn (Assert $page) => $page->where('rematching', true)
+                ->where('suggestions.0.recording_mbid', $newRecording));
+
+        $this->post(route('listens.match', $listen->id), [
+            'recording_mbid' => $newRecording, 'expected_recording_mbid' => $oldRecording,
+            'track_name' => 'Replacement', 'artist_name' => 'New artist',
+        ])->assertRedirect(route('listens.show', $listen->id))->assertSessionHasNoErrors();
+        $this->assertSame($oldRecording, $listen->fresh()->recording_mbid);
+        $this->processRecordingAssociation();
+
+        $this->assertSame(2, Listen::query()->where('user_id', $user->id)->where('recording_mbid', $newRecording)->count());
+        $this->assertSame($oldRecording, Listen::query()->where('user_id', $other->id)->sole()->recording_mbid);
+        $this->assertDatabaseHas('recording_association_runs', ['status' => 'completed', 'matched' => 2]);
+        $listen->refresh();
+        $this->assertSame($fingerprint, $listen->fingerprint);
+        $this->assertSame('Track', $listen->track_name);
+        $this->assertSame('Artist', $listen->artist_name);
+        $this->assertSame(60000, $listen->played_ms);
+        $this->assertSame([$newArtist], $listen->track_metadata['additional_info']['artist_mbids']);
+        $this->assertSame($newRelease, $listen->track_metadata['additional_info']['release_mbid']);
+        $this->get(route('listens.show', $listen->id))->assertInertia(fn (Assert $page) => $page
+            ->has('matchedArtists', 1)->where('matchedArtists.0.mbid', $newArtist)
+            ->has('matchedAlbums', 1)->where('matchedAlbums.0.mbid', $newRelease));
+        config(['musicbrainz.enabled' => false]);
+        $this->post(route('listens.import'), [
+            'source' => 'spotify', 'file' => $this->spotify([$this->row('2024-01-03T12:00:00Z')]),
+        ])->assertSessionHas('import_result', ['imported' => 1, 'duplicates' => 0, 'matched' => 1]);
+        $this->assertSame($newRecording, Listen::query()->latest('id')->firstOrFail()->recording_mbid);
+        Http::assertNothingSent();
+    }
+
+    public function test_rematching_clears_previous_artist_and_release_when_the_replacement_has_neither(): void
+    {
+        $this->musicbrainz();
+        $db = DB::connection('musicbrainz');
+        $newRecording = '44444444-4444-4444-8444-444444444444';
+        $db->table('artist_credit')->insert(['id' => 2, 'name' => 'Unknown credit']);
+        $db->table('recording')->insert(['id' => 2, 'gid' => $newRecording, 'name' => 'Replacement', 'artist_credit' => 2]);
+        $this->actingAs(User::factory()->create())->post(route('listens.import'), [
+            'source' => 'spotify', 'file' => $this->spotify([$this->row('2024-01-01T12:00:00Z')]),
+        ])->assertSessionHasNoErrors();
+        $listen = Listen::query()->sole();
+        $this->assertDatabaseHas('listen_artists', ['listen_id' => $listen->id]);
+        $this->assertDatabaseHas('listen_releases', ['listen_id' => $listen->id]);
+
+        $this->post(route('listens.match', $listen->id), [
+            'recording_mbid' => $newRecording, 'expected_recording_mbid' => $listen->recording_mbid,
+            'track_name' => 'Replacement', 'artist_name' => 'Unknown credit',
+        ])->assertSessionHasNoErrors();
+        $this->processRecordingAssociation();
+
+        $this->assertSame($newRecording, $listen->fresh()->recording_mbid);
+        $this->assertSame([], $listen->fresh()->track_metadata['additional_info']['artist_mbids']);
+        $this->assertArrayNotHasKey('release_mbid', $listen->fresh()->track_metadata['additional_info']);
+        $this->assertDatabaseMissing('listen_artists', ['listen_id' => $listen->id]);
+        $this->assertDatabaseMissing('listen_releases', ['listen_id' => $listen->id]);
+    }
+
     public function test_reimport_identifies_a_previously_unmatched_listen(): void
     {
         $user = User::factory()->create();

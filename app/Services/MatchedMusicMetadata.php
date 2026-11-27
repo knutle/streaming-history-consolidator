@@ -30,6 +30,19 @@ class MatchedMusicMetadata
         }
     }
 
+    /** @param array{recording_mbid: string, artist_mbids: list<string>} $match */
+    public function replaceRecording(Listen $listen, array $match, ?string $recordingName = null): void
+    {
+        $metadata = $listen->track_metadata;
+        unset($metadata['additional_info']['release_mbid']);
+        $metadata['additional_info']['recording_mbid'] = $match['recording_mbid'];
+        $metadata['additional_info']['artist_mbids'] = $match['artist_mbids'];
+        DB::table('listen_artists')->where('listen_id', $listen->id)->delete();
+        DB::table('listen_releases')->where('listen_id', $listen->id)->delete();
+        $listen->update(['recording_mbid' => $match['recording_mbid'], 'track_metadata' => $metadata]);
+        $this->sync($listen, $recordingName);
+    }
+
     public function sync(Listen $listen, ?string $recordingName = null): void
     {
         if ($listen->recording_mbid === null) {

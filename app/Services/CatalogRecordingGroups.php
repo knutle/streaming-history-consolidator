@@ -51,6 +51,40 @@ class CatalogRecordingGroups
         return $id === null ? null : (int) $id;
     }
 
+    public function nativeKey(Listen $listen): ?string
+    {
+        $catalog = $this->native($listen);
+
+        return $catalog === null ? null : $this->key($listen->source, $catalog['id']);
+    }
+
+    /**
+     * The caller must hold the user's row lock inside a transaction.
+     *
+     * @param  list<string>  $keys
+     * @param  array{recording_mbid: string, artist_name: string, artist_mbids: list<string>, artist_names?: array<string, string>, release_mbid: null}  $match
+     * @return list<string>
+     */
+    public function replaceRemembered(User $user, array $keys, array $match, string $previousRecordingMbid): array
+    {
+        $groupIds = DB::table('catalog_recording_members')->where('user_id', $user->id)
+            ->whereIn('catalog_key', $keys)->distinct()->pluck('group_id');
+        $groups = DB::table('catalog_recording_groups')->where('user_id', $user->id)->whereIn('id', $groupIds);
+        foreach ((clone $groups)->whereNotNull('recording_match')->pluck('recording_match') as $value) {
+            $saved = json_decode($value, true, 512, JSON_THROW_ON_ERROR);
+            if (! in_array($saved['recording_mbid'], [$previousRecordingMbid, $match['recording_mbid']], true)) {
+                throw ValidationException::withMessages(['recording_mbid' => 'A linked catalog group has a conflicting saved recording. Resolve or unlink it before re-matching. No matches were changed.']);
+            }
+        }
+        $groups->update(['recording_match' => json_encode($match, JSON_THROW_ON_ERROR), 'updated_at' => now()]);
+        $members = DB::table('catalog_recording_members')->where('user_id', $user->id)
+            ->whereIn('group_id', $groupIds)->pluck('catalog_key')->all();
+        $this->matches = [];
+        $this->loaded = [];
+
+        return array_values(array_unique([...$keys, ...$members]));
+    }
+
     /** @return list<array{id: int, catalog: array<string, mixed>}> */
     public function members(Listen $listen): array
     {

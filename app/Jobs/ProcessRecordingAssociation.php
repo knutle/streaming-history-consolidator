@@ -64,7 +64,11 @@ class ProcessRecordingAssociation implements ShouldQueue
             $user = User::query()->whereKey($run->user_id)->firstOrFail();
             $listen = Listen::query()->where('user_id', $user->id)->whereKey($run->listen_id)->first();
             $payload = json_decode($run->payload, true, 512, JSON_THROW_ON_ERROR);
-            if ($listen === null || $listen->recording_mbid !== null || $listen->track_name !== $payload['track_name']
+            $expected = $payload['type'] === 'replacement' ? $payload['expected_recording_mbid'] : null;
+            if ($payload['type'] === 'replacement' && ! is_string($expected)) {
+                throw new \UnexpectedValueException('Missing recording replacement snapshot.');
+            }
+            if ($listen === null || $listen->recording_mbid !== $expected || $listen->track_name !== $payload['track_name']
                 || $listen->artist_name !== $payload['artist_name'] || $listen->release_name !== $payload['release_name']) {
                 throw ValidationException::withMessages(['recording_mbid' => 'This listen has changed or has already been identified.']);
             }
@@ -93,6 +97,8 @@ class ProcessRecordingAssociation implements ShouldQueue
                 DB::table('pending_musicbrainz_matches')->where('id', $review->id)->delete();
             } elseif ($payload['type'] === 'manual') {
                 $matched = $manual->remember($user, $listen, $payload['match'], $payload['recording_name']);
+            } elseif ($payload['type'] === 'replacement') {
+                $matched = $manual->replace($user, $listen, $payload['match'], $expected, $payload['recording_name']);
             } else {
                 throw new \UnexpectedValueException('Invalid recording association type.');
             }

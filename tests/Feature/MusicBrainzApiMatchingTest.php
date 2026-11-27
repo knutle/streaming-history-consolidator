@@ -124,6 +124,62 @@ class MusicBrainzApiMatchingTest extends TestCase
         ]);
     }
 
+    public function test_matched_recordings_require_explicit_search_and_a_current_snapshot_before_replacement(): void
+    {
+        Http::preventStrayRequests();
+        Sleep::fake();
+        $listen = $this->importedListen();
+        $owner = User::query()->findOrFail($listen->user_id);
+        $oldRecording = '33333333-3333-4333-8333-333333333333';
+        $listen->update(['recording_mbid' => $oldRecording]);
+        $values = ['recording_mbid' => $this->recording()['id'], 'track_name' => 'Song',
+            'artist_name' => 'Artist', 'search_source' => 'api'];
+        $this->get(route('listens.show', ['listen' => $listen->id, 'search_source' => 'api']))
+            ->assertInertia(fn (Assert $page) => $page->where('rematching', false)->has('suggestions', 0));
+        $this->post(route('listens.match', $listen->id), $values)->assertSessionHasErrors('recording_mbid');
+        $this->post(route('listens.match', $listen->id), $values + ['expected_recording_mbid' => $this->recording()['id']])
+            ->assertSessionHasErrors('recording_mbid');
+        $this->actingAs(User::factory()->create())
+            ->get(route('listens.show', ['listen' => $listen->id, 'search_source' => 'api', 'rematch' => 1]))->assertNotFound();
+        $this->post(route('listens.match', $listen->id), $values + ['expected_recording_mbid' => $oldRecording])->assertNotFound();
+        Http::assertNothingSent();
+
+        $this->actingAs($owner);
+        Http::fake([
+            'musicbrainz.org/ws/2/recording?*' => Http::response(['count' => 1, 'recordings' => [$this->recording()]]),
+            'musicbrainz.org/ws/2/recording/*' => Http::response($this->recording()),
+        ]);
+        $this->get(route('listens.show', ['listen' => $listen->id, 'search_source' => 'api', 'rematch' => 1]))
+            ->assertInertia(fn (Assert $page) => $page->where('rematching', true)
+                ->where('suggestions.0.recording_mbid', $this->recording()['id']));
+        $this->post(route('listens.match', $listen->id), $values + ['expected_recording_mbid' => $oldRecording])
+            ->assertSessionHasNoErrors();
+        $this->assertSame($oldRecording, $listen->fresh()->recording_mbid);
+        $this->artisan('queue:work', ['connection' => 'imports', '--once' => true])->assertSuccessful();
+        $this->assertSame($this->recording()['id'], $listen->fresh()->recording_mbid);
+        Http::assertSentCount(2);
+    }
+
+    public function test_a_queued_replacement_cannot_overwrite_a_newer_recording_choice(): void
+    {
+        Http::preventStrayRequests();
+        $listen = $this->importedListen();
+        $oldRecording = '33333333-3333-4333-8333-333333333333';
+        $newerRecording = '44444444-4444-4444-8444-444444444444';
+        $listen->update(['recording_mbid' => $oldRecording]);
+        Http::fake(['musicbrainz.org/ws/2/recording/*' => Http::response($this->recording())]);
+        $this->post(route('listens.match', $listen->id), [
+            'recording_mbid' => $this->recording()['id'], 'expected_recording_mbid' => $oldRecording,
+            'track_name' => 'Song', 'artist_name' => 'Artist', 'search_source' => 'api',
+        ])->assertSessionHasNoErrors();
+        $listen->update(['recording_mbid' => $newerRecording]);
+        $this->artisan('queue:work', ['connection' => 'imports', '--once' => true, '--tries' => 1])->assertSuccessful();
+        $this->assertSame($newerRecording, $listen->fresh()->recording_mbid);
+        $this->assertDatabaseHas('recording_association_runs', ['status' => 'failed']);
+        $this->assertDatabaseCount('listen_matches', 0);
+        Http::assertSentCount(1);
+    }
+
     public function test_api_recording_suggestions_show_release_details_and_missing_metadata(): void
     {
         Http::preventStrayRequests();

@@ -118,20 +118,22 @@ class ListenController extends Controller
             'page' => ['nullable', 'integer', 'min:1', 'max:1000'],
             'merge_q' => ['nullable', 'string', 'max:255'],
             'search_source' => ['nullable', Rule::in(['local', 'api'])],
+            'rematch' => ['sometimes', 'boolean'],
         ]);
         $item = Listen::query()->where('user_id', $request->user()->id)->findOrFail($listen);
         $search = $values['q'] ?? mb_substr($item->track_name, 0, 12);
         $artist = $values['artist'] ?? '';
         $page = (int) ($values['page'] ?? 1);
         $source = $values['search_source'] ?? 'local';
+        $rematching = $item->recording_mbid !== null && $request->boolean('rematch');
         $searchResult = null;
-        $searchRecordings = function () use (&$searchResult, $item, $source, $api, $matcher, $search, $artist, $page): array {
+        $searchRecordings = function () use (&$searchResult, $item, $rematching, $source, $api, $matcher, $search, $artist, $page): array {
             if ($searchResult !== null) {
                 return $searchResult;
             }
             $candidates = ['results' => [], 'hasMore' => false];
             $apiError = null;
-            if ($item->recording_mbid === null) {
+            if ($item->recording_mbid === null || $rematching) {
                 if ($source === 'api') {
                     try {
                         $candidates = $api->search($search, $artist, $page);
@@ -192,6 +194,7 @@ class ListenController extends Controller
             'related' => $related,
             'musicbrainzEnabled' => (bool) config('musicbrainz.enabled'),
             'searchSource' => $source,
+            'rematching' => $rematching,
             'apiError' => fn () => $searchRecordings()['error'],
             'search' => $search,
             'artistSearch' => $artist,
@@ -287,13 +290,21 @@ class ListenController extends Controller
 
     public function match(Request $request, int $listen, MusicBrainzMatcher $matcher, MusicBrainzApi $api): RedirectResponse
     {
-        $item = Listen::query()->where('user_id', $request->user()->id)->whereNull('recording_mbid')->findOrFail($listen);
+        $item = Listen::query()->where('user_id', $request->user()->id)->findOrFail($listen);
         $values = $request->validate([
             'recording_mbid' => ['required', 'uuid'],
             'track_name' => ['required', 'string', 'max:255'],
             'artist_name' => ['required', 'string', 'max:255'],
             'search_source' => ['nullable', Rule::in(['local', 'api'])],
+            'expected_recording_mbid' => ['nullable', 'uuid'],
         ]);
+        $expected = $values['expected_recording_mbid'] ?? null;
+        if ($item->recording_mbid !== $expected) {
+            throw ValidationException::withMessages(['recording_mbid' => 'This listen has changed. Reload it before choosing a recording.']);
+        }
+        if ($expected !== null && $values['recording_mbid'] === $expected) {
+            throw ValidationException::withMessages(['recording_mbid' => 'Choose a different recording to replace the current match.']);
+        }
         $match = ($values['search_source'] ?? 'local') === 'api'
             ? $api->recording($values['recording_mbid'], $values['track_name'], $values['artist_name'])
             : $matcher->recording($values['recording_mbid'], $values['track_name'], $values['artist_name']);
@@ -301,16 +312,18 @@ class ListenController extends Controller
             throw ValidationException::withMessages(['recording_mbid' => 'The selected recording is unavailable in the local MusicBrainz database.']);
         }
 
-        DB::transaction(function () use ($request, $item, $match, $values): void {
+        DB::transaction(function () use ($request, $item, $match, $values, $expected): void {
             DB::table('users')->where('id', $request->user()->id)->lockForUpdate()->first();
             $current = Listen::query()->where('user_id', $request->user()->id)
-                ->whereKey($item->id)->whereNull('recording_mbid')->first();
-            if ($current === null || $current->track_name !== $item->track_name
+                ->whereKey($item->id)->first();
+            if ($current === null || $current->recording_mbid !== $expected || $current->track_name !== $item->track_name
                 || $current->artist_name !== $item->artist_name || $current->release_name !== $item->release_name) {
                 throw ValidationException::withMessages(['recording_mbid' => 'This listen has changed, been identified, or deleted.']);
             }
             ProcessRecordingAssociation::enqueue($request->user(), $current, [
-                'type' => 'manual', 'match' => $match, 'recording_name' => $values['track_name'],
+                'type' => $expected === null ? 'manual' : 'replacement',
+                'expected_recording_mbid' => $expected,
+                'match' => $match, 'recording_name' => $values['track_name'],
             ]);
         });
 

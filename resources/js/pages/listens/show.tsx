@@ -103,6 +103,7 @@ type Props = ArtworkProps & {
     listen: Listen;
     related: Listen[];
     musicbrainzEnabled: boolean;
+    rematching: boolean;
     searchSource: 'local' | 'api';
     apiError: string | null;
     search: string;
@@ -181,6 +182,7 @@ function PollRecordingAssociation() {
             'related',
             'matchedArtists',
             'matchedAlbums',
+            'artwork',
             'linkedCatalogs',
             'linkedEvidence',
             'catalogs',
@@ -194,6 +196,7 @@ export default function ListenDetails({
     listen,
     related,
     musicbrainzEnabled,
+    rematching,
     searchSource,
     apiError,
     search,
@@ -1228,17 +1231,48 @@ export default function ListenDetails({
                         </p>
                     )}
                 </section>
-                {listen.recording_mbid === null && (
-                    <section className="rounded-xl border border-emerald-200 bg-emerald-50/40 p-5 sm:p-6 dark:border-emerald-900 dark:bg-emerald-950/15">
+                {listen.recording_mbid !== null && !rematching && (
+                    <section className="rounded-xl border bg-card p-5 shadow-sm sm:p-6">
                         <h2 className="text-lg font-semibold">
-                            Identify this song
+                            Recording match
                         </h2>
                         <p className="mt-2 text-sm text-muted-foreground">
-                            Choose a recording to identify your unmatched
-                            listens with the same track and artist, and remember
-                            it for future imports. Existing matched listens are
-                            not changed.
+                            Wrong recording? Search for a replacement without
+                            removing the current match first.
                         </p>
+                        {!associationActive && (
+                            <Button asChild variant="outline" className="mt-4">
+                                <Link
+                                    href={show(listen.id, {
+                                        query: { rematch: 1 },
+                                    })}
+                                >
+                                    Re-match recording
+                                </Link>
+                            </Button>
+                        )}
+                    </section>
+                )}
+                {(listen.recording_mbid === null || rematching) && (
+                    <section className="rounded-xl border border-emerald-200 bg-emerald-50/40 p-5 sm:p-6 dark:border-emerald-900 dark:bg-emerald-950/15">
+                        <h2 className="text-lg font-semibold">
+                            {rematching
+                                ? 'Re-match this song'
+                                : 'Identify this song'}
+                        </h2>
+                        <p className="mt-2 text-sm text-muted-foreground">
+                            {rematching
+                                ? 'Replace the recording for your listens with the same track and artist and their linked catalog tracks. The choice is remembered for future imports. Conflicting recordings or saved choices stop the entire replacement; no matches are changed.'
+                                : 'Choose a recording to identify your unmatched listens with the same track and artist, and remember it for future imports. Existing matched listens are not changed.'}
+                        </p>
+                        {rematching && (
+                            <Link
+                                href={show(listen.id)}
+                                className="mt-3 inline-block text-sm underline"
+                            >
+                                Cancel re-matching
+                            </Link>
+                        )}
                         {musicBrainzSeed && (
                             <p className="mt-3 text-sm">
                                 Missing from MusicBrainz?{' '}
@@ -1290,6 +1324,13 @@ export default function ListenDetails({
                                 {...show.form(listen.id)}
                                 className="mt-4 flex flex-wrap items-end gap-3"
                             >
+                                {rematching && (
+                                    <input
+                                        type="hidden"
+                                        name="rematch"
+                                        value="1"
+                                    />
+                                )}
                                 <div className="grid flex-1 gap-2">
                                     <Label htmlFor="recording-search">
                                         Recording name (local search is
@@ -1459,9 +1500,27 @@ export default function ListenDetails({
                                                     </div>
                                                 )}
                                             </div>
-                                            <Form {...match.form(listen.id)}>
+                                            <Form
+                                                {...match.form(listen.id)}
+                                                onBefore={() =>
+                                                    !rematching ||
+                                                    window.confirm(
+                                                        `Replace the current recording with "${item.track_name}" by ${item.artist_name} for your matching listens and linked catalog tracks? Conflicts will leave all matches unchanged.`,
+                                                    )
+                                                }
+                                            >
                                                 {({ processing }) => (
                                                     <>
+                                                        {listen.recording_mbid !==
+                                                            null && (
+                                                            <input
+                                                                type="hidden"
+                                                                name="expected_recording_mbid"
+                                                                value={
+                                                                    listen.recording_mbid
+                                                                }
+                                                            />
+                                                        )}
                                                         <input
                                                             type="hidden"
                                                             name="search_source"
@@ -1491,10 +1550,18 @@ export default function ListenDetails({
                                                         <Button
                                                             type="submit"
                                                             disabled={
-                                                                processing
+                                                                processing ||
+                                                                associationActive ||
+                                                                item.recording_mbid ===
+                                                                    listen.recording_mbid
                                                             }
                                                         >
-                                                            Choose recording
+                                                            {item.recording_mbid ===
+                                                            listen.recording_mbid
+                                                                ? 'Current recording'
+                                                                : rematching
+                                                                  ? 'Replace recording'
+                                                                  : 'Choose recording'}
                                                         </Button>
                                                     </>
                                                 )}
@@ -1516,6 +1583,9 @@ export default function ListenDetails({
                                                     q: search,
                                                     artist: artistSearch,
                                                     search_source: searchSource,
+                                                    rematch: rematching
+                                                        ? 1
+                                                        : undefined,
                                                     page: searchPage - 1,
                                                 },
                                             })}
@@ -1531,6 +1601,9 @@ export default function ListenDetails({
                                                     q: search,
                                                     artist: artistSearch,
                                                     search_source: searchSource,
+                                                    rematch: rematching
+                                                        ? 1
+                                                        : undefined,
                                                     page: searchPage + 1,
                                                 },
                                             })}

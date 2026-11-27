@@ -29,6 +29,83 @@ class ManualListenMatcher
     }
 
     /** @param array{recording_mbid: string, artist_name: string, artist_mbids: list<string>, artist_names?: array<string, string>, release_mbid: null} $match */
+    public function replace(User $user, Listen $listen, array $match, string $previousRecordingMbid, ?string $recordingName = null): int
+    {
+        return DB::transaction(function () use ($user, $listen, $match, $previousRecordingMbid, $recordingName): int {
+            DB::table('users')->where('id', $user->id)->lockForUpdate()->first();
+            $current = Listen::query()->where('user_id', $user->id)->find($listen->id);
+            if ($current === null || $current->recording_mbid !== $previousRecordingMbid
+                || $current->track_name !== $listen->track_name || $current->artist_name !== $listen->artist_name
+                || $current->release_name !== $listen->release_name) {
+                throw ValidationException::withMessages(['recording_mbid' => 'This listen has changed. Reload it before re-matching.']);
+            }
+            if ($match['recording_mbid'] === $previousRecordingMbid) {
+                throw ValidationException::withMessages(['recording_mbid' => 'Choose a different recording to replace the current match.']);
+            }
+
+            $songKey = $this->key($current->track_name, $current->artist_name);
+            $catalogKeys = [];
+            Listen::query()->where('user_id', $user->id)->chunkById(500, function ($listens) use ($songKey, &$catalogKeys): void {
+                foreach ($listens as $candidate) {
+                    if ($this->key($candidate->track_name, $candidate->artist_name) === $songKey) {
+                        $catalogKey = $this->catalogGroups->nativeKey($candidate);
+                        if ($catalogKey !== null) {
+                            $catalogKeys[$catalogKey] = true;
+                        }
+                    }
+                }
+            });
+            $catalogKeys = array_fill_keys($this->catalogGroups->replaceRemembered($user, array_keys($catalogKeys), $match, $previousRecordingMbid), true);
+            $saved = DB::table('listen_matches')->where('user_id', $user->id)->pluck('match', 'song_key');
+            $remembered = [];
+            $updated = 0;
+            $this->matchedMetadata->rememberArtistNames($match['artist_names'] ?? []);
+            Listen::query()->where('user_id', $user->id)->chunkById(500, function ($listens) use ($user, $songKey, $catalogKeys, $saved, $match, $previousRecordingMbid, $recordingName, &$remembered, &$updated): void {
+                foreach ($listens as $candidate) {
+                    $key = $this->key($candidate->track_name, $candidate->artist_name);
+                    if ($key !== $songKey && ! isset($catalogKeys[$this->catalogGroups->nativeKey($candidate)])) {
+                        continue;
+                    }
+                    if (! in_array($candidate->recording_mbid, [null, $previousRecordingMbid, $match['recording_mbid']], true)) {
+                        throw ValidationException::withMessages(['recording_mbid' => 'An affected listen has a conflicting recording. Resolve or unlink it before re-matching. No matches were changed.']);
+                    }
+                    if (! isset($remembered[$key])) {
+                        if (isset($saved[$key])) {
+                            $choice = json_decode($saved[$key], true, 512, JSON_THROW_ON_ERROR);
+                            if (! in_array($choice['recording_mbid'], [$previousRecordingMbid, $match['recording_mbid']], true)) {
+                                throw ValidationException::withMessages(['recording_mbid' => 'An affected track has a conflicting saved recording. Resolve it before re-matching. No matches were changed.']);
+                            }
+                        }
+                        $this->saveChoice($user, $candidate, $match, $recordingName);
+                        $remembered[$key] = true;
+                    }
+                    if ($candidate->recording_mbid !== $match['recording_mbid']) {
+                        $this->matchedMetadata->replaceRecording($candidate, $match, $recordingName);
+                        DB::table('pending_musicbrainz_matches')->where('user_id', $user->id)->where('listen_id', $candidate->id)->delete();
+                        $updated++;
+                    }
+                }
+            });
+            $updated += $this->catalogGroups->linkMatching($user, $this, [$match['recording_mbid']])['matched'];
+
+            return $updated;
+        });
+    }
+
+    /** @param array{recording_mbid: string, artist_name: string, artist_mbids: list<string>, artist_names?: array<string, string>, release_mbid: null} $match */
+    private function saveChoice(User $user, Listen $listen, array $match, ?string $recordingName): void
+    {
+        DB::table('listen_matches')->updateOrInsert(
+            ['user_id' => $user->id, 'song_key' => $this->key($listen->track_name, $listen->artist_name)],
+            ['match' => json_encode($match + [
+                'source_track' => $listen->track_name,
+                'source_artist' => $listen->artist_name,
+                'recording_name' => $recordingName,
+            ], JSON_THROW_ON_ERROR), 'updated_at' => now(), 'created_at' => now()],
+        );
+    }
+
+    /** @param array{recording_mbid: string, artist_name: string, artist_mbids: list<string>, artist_names?: array<string, string>, release_mbid: null} $match */
     public function remember(User $user, Listen $listen, array $match, ?string $recordingName = null): int
     {
         return DB::transaction(function () use ($user, $listen, $match, $recordingName) {
@@ -38,14 +115,7 @@ class ManualListenMatcher
             }
             $this->matchedMetadata->rememberArtistNames($match['artist_names'] ?? []);
             $key = $this->key($listen->track_name, $listen->artist_name);
-            DB::table('listen_matches')->updateOrInsert(
-                ['user_id' => $user->id, 'song_key' => $key],
-                ['match' => json_encode($match + [
-                    'source_track' => $listen->track_name,
-                    'source_artist' => $listen->artist_name,
-                    'recording_name' => $recordingName,
-                ], JSON_THROW_ON_ERROR), 'updated_at' => now(), 'created_at' => now()],
-            );
+            $this->saveChoice($user, $listen, $match, $recordingName);
 
             $updated = 0;
             $groups = [];
