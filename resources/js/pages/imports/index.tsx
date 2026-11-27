@@ -1,4 +1,5 @@
-import { Form, Head, Link, usePoll } from '@inertiajs/react';
+import { Head, Link, usePoll } from '@inertiajs/react';
+import Form from '@/components/form';
 import ImportHistory from '@/components/import-history';
 import InputError from '@/components/input-error';
 import { Button } from '@/components/ui/button';

@@ -1,5 +1,6 @@
-import { Form, Head, Link, useHttp, usePage } from '@inertiajs/react';
+import { Head, Link, useHttp, usePage } from '@inertiajs/react';
 import { useRef, useState } from 'react';
+import Form from '@/components/form';
 import InputError from '@/components/input-error';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';

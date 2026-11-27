@@ -1,4 +1,5 @@
-import { Form, Head, Link } from '@inertiajs/react';
+import { Head, Link } from '@inertiajs/react';
+import Form from '@/components/form';
 import InputError from '@/components/input-error';
 import { Button } from '@/components/ui/button';
 import { lookupName } from '@/routes/artists';

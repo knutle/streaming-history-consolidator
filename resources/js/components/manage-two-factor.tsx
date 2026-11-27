@@ -1,4 +1,4 @@
-import { Form } from '@inertiajs/react';
+import Form from '@/components/form';
 import { ShieldCheck } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import Heading from '@/components/heading';

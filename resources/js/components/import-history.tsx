@@ -1,4 +1,4 @@
-import { Form } from '@inertiajs/react';
+import Form from '@/components/form';
 import Heading from '@/components/heading';
 import InputError from '@/components/input-error';
 import { Button } from '@/components/ui/button';
