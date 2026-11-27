@@ -18,6 +18,7 @@ use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Sleep;
 use Illuminate\Validation\ValidationException;
 use Inertia\Testing\AssertableInertia as Assert;
+use PHPUnit\Framework\Attributes\TestWith;
 use Tests\TestCase;
 
 class BulkMusicBrainzMatchingTest extends TestCase
@@ -83,8 +84,11 @@ class BulkMusicBrainzMatchingTest extends TestCase
         $this->actingAs($other)->post(route('listens.bulk-musicbrainz.cancel', $run->id))->assertNotFound();
     }
 
-    public function test_unique_exact_results_match_but_ambiguous_or_incomplete_results_do_not(): void
+    #[TestWith(['https://musicbrainz.org/ws/2'])]
+    #[TestWith(['http://musicbrainz:5000/ws/2'])]
+    public function test_unique_exact_results_match_but_ambiguous_or_incomplete_results_do_not(string $endpoint): void
     {
+        config(['musicbrainz.api_base_url' => $endpoint, 'musicbrainz.api_min_interval' => 0]);
         Queue::fake([ProcessBulkMusicBrainzMatch::class]);
         Http::preventStrayRequests();
         Sleep::fake();
@@ -94,7 +98,7 @@ class BulkMusicBrainzMatchingTest extends TestCase
         $this->actingAs($user)->post(route('listens.bulk-musicbrainz.selection'), ['action' => 'all']);
         $this->post(route('listens.bulk-musicbrainz.store'), ['confirm' => '1'])->assertSessionHasNoErrors();
         $run = DB::table('bulk_musicbrainz_runs')->sole();
-        Http::fake(['musicbrainz.org/ws/2/recording?*' => function (Request $request) {
+        Http::fake([$endpoint.'/recording?*' => function (Request $request) {
             if (str_contains($request['query'], 'Ambiguous')) {
                 return Http::response(['count' => 101, 'recordings' => [$this->recording()]]);
             }
@@ -182,8 +186,11 @@ class BulkMusicBrainzMatchingTest extends TestCase
             ->where('pending.links.2.url', route('listens.bulk-musicbrainz.review', ['matched_page' => 2, 'page' => 2])));
     }
 
-    public function test_rate_limits_retry_then_pause_and_can_resume_or_cancel(): void
+    #[TestWith(['https://musicbrainz.org/ws/2'])]
+    #[TestWith(['http://musicbrainz:5000/ws/2'])]
+    public function test_rate_limits_retry_then_pause_and_can_resume_or_cancel(string $endpoint): void
     {
+        config(['musicbrainz.api_base_url' => $endpoint, 'musicbrainz.api_min_interval' => 0]);
         Queue::fake([ProcessBulkMusicBrainzMatch::class]);
         Http::preventStrayRequests();
         Sleep::fake();
@@ -192,7 +199,7 @@ class BulkMusicBrainzMatchingTest extends TestCase
         $this->actingAs($user)->post(route('listens.bulk-musicbrainz.selection'), ['action' => 'all']);
         $this->post(route('listens.bulk-musicbrainz.store'), ['confirm' => '1']);
         $run = DB::table('bulk_musicbrainz_runs')->sole();
-        Http::fake(['musicbrainz.org/ws/2/recording?*' => Http::response([], 503, ['Retry-After' => '60'])]);
+        Http::fake([$endpoint.'/recording?*' => Http::response([], 503, ['Retry-After' => '60'])]);
         $this->runJob($run->id);
         $row = DB::table('bulk_musicbrainz_runs')->where('id', $run->id)->first();
         $this->assertSame('waiting', $row->status);

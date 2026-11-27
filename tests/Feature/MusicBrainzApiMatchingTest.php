@@ -9,6 +9,8 @@ use App\Models\Listen;
 use App\Models\User;
 use App\Services\ManualListenMatcher;
 use App\Services\ManualMusicEntityMatcher;
+use App\Services\MusicBrainzApi;
+use Carbon\CarbonInterval;
 use GuzzleHttp\Promise\PromiseInterface;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\Request;
@@ -20,6 +22,7 @@ use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Sleep;
 use Illuminate\Validation\ValidationException;
 use Inertia\Testing\AssertableInertia as Assert;
+use PHPUnit\Framework\Attributes\TestWith;
 use Tests\TestCase;
 
 class MusicBrainzApiMatchingTest extends TestCase
@@ -57,20 +60,25 @@ class MusicBrainzApiMatchingTest extends TestCase
         ];
     }
 
-    public function test_api_search_and_selection_work_without_local_database(): void
+    #[TestWith(['https://musicbrainz.org/ws/2', 'https://musicbrainz.org/ws/2'])]
+    #[TestWith(['http://MUSICBRAINZ:5000/proxy/ws/2///', 'http://musicbrainz:5000/proxy/ws/2'])]
+    #[TestWith(['https://mirror.example.test:443/ws/2/', 'https://mirror.example.test/ws/2'])]
+    #[TestWith(['http://[::1]:5000/ws/2/', 'http://[::1]:5000/ws/2'])]
+    public function test_api_search_and_selection_work_without_local_database(string $configured, string $endpoint): void
     {
+        config(['musicbrainz.api_base_url' => $configured]);
         Http::preventStrayRequests();
         Sleep::fake();
         $listen = $this->importedListen();
         Http::fake([
-            'musicbrainz.org/ws/2/recording?*' => Http::response(['count' => 31, 'recordings' => [$this->recording()]]),
-            'musicbrainz.org/ws/2/recording/22222222-2222-4222-8222-222222222222?*' => Http::response($this->recording()),
+            $endpoint.'/recording?*' => Http::response(['count' => 31, 'recordings' => [$this->recording()]]),
+            $endpoint.'/recording/22222222-2222-4222-8222-222222222222?*' => Http::response($this->recording()),
         ]);
         $this->get(route('listens.show', ['listen' => $listen->id, 'q' => 'Song', 'artist' => 'Artist', 'search_source' => 'api']))
             ->assertOk()->assertInertia(fn (Assert $page) => $page->where('searchSource', 'api')
             ->where('suggestions.0.recording_mbid', '22222222-2222-4222-8222-222222222222')
             ->where('suggestions.0.artist_name', 'Artist')->where('hasMore', true));
-        Http::assertSent(fn (Request $request) => str_starts_with($request->url(), 'https://musicbrainz.org/ws/2/recording?')
+        Http::assertSent(fn (Request $request) => str_starts_with($request->url(), $endpoint.'/recording?')
             && $request['query'] === 'recording:"Song" AND artist:"Artist"' && $request->hasHeader('User-Agent'));
 
         $this->post(route('listens.match', $listen->id), [
@@ -95,6 +103,117 @@ class MusicBrainzApiMatchingTest extends TestCase
         $this->assertSame('22222222-2222-4222-8222-222222222222', Listen::query()->latest('id')->firstOrFail()->recording_mbid);
         Http::assertSentCount(2);
         Sleep::assertSleptTimes(1);
+    }
+
+    #[TestWith(['api_base_url', 'not-a-url', 'url'])]
+    #[TestWith(['api_base_url', 'file:///example', 'url'])]
+    #[TestWith(['api_base_url', 'http://user:pass@musicbrainz:5000/ws/2', 'url'])]
+    #[TestWith(['api_base_url', 'http://musicbrainz:5000/ws/2?fmt=json', 'url'])]
+    #[TestWith(['api_base_url', 'http://musicbrainz:5000/ws/2#fragment', 'url'])]
+    #[TestWith(['api_base_url', 'http://musicbrainz.org/ws/2', 'https'])]
+    #[TestWith(['api_min_interval', -1, 'interval'])]
+    #[TestWith(['api_min_interval', 'not-a-number', 'interval'])]
+    #[TestWith(['api_min_interval', '1e309', 'interval'])]
+    #[TestWith(['api_min_interval', true, 'interval'])]
+    public function test_invalid_mirror_configuration_is_reported_without_sending_a_request(string $setting, mixed $value, string $error): void
+    {
+        Http::preventStrayRequests();
+        $listen = $this->importedListen();
+        config(['musicbrainz.'.$setting => $value]);
+        $message = match ($error) {
+            'url' => 'The configured MusicBrainz API base URL must be an HTTP(S) URL without credentials, a query, or a fragment.',
+            'https' => 'The public MusicBrainz API requires HTTPS.',
+            'interval' => 'The configured MusicBrainz API interval must be a finite, non-negative number within the supported timer range.',
+        };
+
+        $this->get(route('listens.show', ['listen' => $listen->id, 'q' => 'Song', 'search_source' => 'api']))
+            ->assertOk()->assertInertia(fn (Assert $page) => $page->where('apiError', $message));
+
+        Http::assertNothingSent();
+    }
+
+    #[TestWith(['http://musicbrainz:5000/ws/2', 'http://musicbrainz:5000/ws/2', 0, 0.0])]
+    #[TestWith(['http://musicbrainz:5000/ws/2', 'http://musicbrainz:5000/ws/2', '2.5', 2.5])]
+    #[TestWith(['https://musicbrainz.org/ws/2', 'https://musicbrainz.org/ws/2', 0, 1.1])]
+    #[TestWith(['HTTPS://WWW.MusicBrainz.ORG.:443/ws/2/', 'https://www.musicbrainz.org/ws/2', 0, 1.1])]
+    public function test_request_spacing_is_configurable_only_below_the_public_minimum_on_mirrors(string $configured, string $endpoint, int|float|string $interval, float $expected): void
+    {
+        config(['musicbrainz.api_base_url' => $configured, 'musicbrainz.api_min_interval' => $interval]);
+        Http::preventStrayRequests();
+        Sleep::fake();
+        $requestedAt = null;
+        $pausedAt = null;
+        $pausedFor = null;
+        Http::fake([$endpoint.'/recording?*' => function () use (&$requestedAt): PromiseInterface {
+            $requestedAt ??= microtime(true);
+
+            return Http::response(['count' => 0, 'recordings' => []]);
+        }]);
+        Sleep::whenFakingSleep(function (CarbonInterval $duration) use (&$pausedAt, &$pausedFor): void {
+            $pausedAt = microtime(true);
+            $pausedFor = $duration->totalSeconds;
+        });
+        $api = app(MusicBrainzApi::class);
+
+        $api->search('Song', 'Artist', 1);
+        $api->search('Song', 'Artist', 1);
+
+        if ($expected === 0.0) {
+            Sleep::assertNeverSlept();
+        } else {
+            Sleep::assertSleptTimes(1);
+            $this->assertNotNull($requestedAt);
+            $this->assertNotNull($pausedAt);
+            $this->assertNotNull($pausedFor);
+            $this->assertEqualsWithDelta($expected, $pausedFor + ($pausedAt - $requestedAt), 0.05);
+        }
+        Http::assertSentCount(2);
+    }
+
+    public function test_mirror_cooldowns_are_isolated_and_normalized_without_public_fallback(): void
+    {
+        Http::preventStrayRequests();
+        Sleep::fake();
+        $listen = $this->importedListen();
+        Http::fake([
+            'http://mirror-a/ws/2/recording?*' => Http::response([], 503, ['Retry-After' => '60']),
+            'http://mirror-b:5000/ws/2/recording?*' => Http::response(['count' => 0, 'recordings' => []]),
+            'https://musicbrainz.org/ws/2/recording?*' => Http::response(['count' => 0, 'recordings' => []]),
+        ]);
+        config(['musicbrainz.api_base_url' => 'http://mirror-a/ws/2', 'musicbrainz.api_min_interval' => 0]);
+        $url = route('listens.show', ['listen' => $listen->id, 'q' => 'Song', 'search_source' => 'api']);
+
+        $this->get($url)->assertOk()->assertInertia(fn (Assert $page) => $page
+            ->where('apiError', 'MusicBrainz is unavailable or rate-limited. Please try again later.'));
+        Http::assertSentCount(1);
+        foreach (['http://mirror-b:5000/ws/2', 'https://musicbrainz.org/ws/2'] as $endpoint) {
+            config(['musicbrainz.api_base_url' => $endpoint]);
+            $this->get($url)->assertOk()->assertInertia(fn (Assert $page) => $page->where('apiError', null));
+        }
+        config(['musicbrainz.api_base_url' => 'HTTP://MIRROR-A:80/ws/2///']);
+        $this->get($url)->assertOk()->assertInertia(fn (Assert $page) => $page
+            ->where('apiError', 'MusicBrainz is unavailable or rate-limited. Please try again later.'));
+        Http::assertSentCount(3);
+        Sleep::assertNeverSlept();
+    }
+
+    #[TestWith([false])]
+    #[TestWith([true])]
+    public function test_mirror_connection_failures_and_redirects_do_not_contact_the_public_service(bool $redirect): void
+    {
+        Http::preventStrayRequests();
+        $listen = $this->importedListen();
+        config(['musicbrainz.api_base_url' => 'http://musicbrainz:5000/ws/2', 'musicbrainz.api_min_interval' => 0]);
+        Http::fake(['http://musicbrainz:5000/ws/2/recording?*' => $redirect
+            ? Http::response('', 302, ['Location' => 'https://musicbrainz.org/ws/2/recording'])
+            : Http::failedConnection()]);
+
+        $this->get(route('listens.show', ['listen' => $listen->id, 'q' => 'Song', 'search_source' => 'api']))
+            ->assertOk()->assertInertia(fn (Assert $page) => $page->where('apiError', $redirect
+            ? 'MusicBrainz could not complete this request. Please try again.'
+            : 'Could not connect to MusicBrainz. Please try again.'));
+
+        Http::assertNotSent(fn (Request $request) => str_starts_with($request->url(), 'https://musicbrainz.org/'));
     }
 
     public function test_recording_selection_is_queued_and_a_stale_choice_fails_without_overwriting(): void
@@ -363,8 +482,11 @@ class MusicBrainzApiMatchingTest extends TestCase
         Http::assertSentCount(1);
     }
 
-    public function test_artist_and_release_api_search_and_selection_work_without_local_database(): void
+    #[TestWith(['https://musicbrainz.org/ws/2'])]
+    #[TestWith(['http://musicbrainz:5000/ws/2'])]
+    public function test_artist_and_release_api_search_and_selection_work_without_local_database(string $endpoint): void
     {
+        config(['musicbrainz.api_base_url' => $endpoint]);
         Http::preventStrayRequests();
         Sleep::fake();
         $listen = $this->importedListen();
@@ -378,10 +500,10 @@ class MusicBrainzApiMatchingTest extends TestCase
         DB::table('music_artists')->insert(['mbid' => $artist['id'], 'name' => null, 'name_source' => null]);
         DB::table('music_releases')->insert(['mbid' => $release['id'], 'name' => 'Unverified album']);
         Http::fake([
-            'musicbrainz.org/ws/2/artist?*' => Http::response(['count' => 31, 'artists' => [$artist]]),
-            'musicbrainz.org/ws/2/release?*' => Http::response(['count' => 1, 'releases' => [$release]]),
-            'musicbrainz.org/ws/2/artist/*' => Http::response($artist),
-            'musicbrainz.org/ws/2/release/*' => Http::response($release),
+            $endpoint.'/artist?*' => Http::response(['count' => 31, 'artists' => [$artist]]),
+            $endpoint.'/release?*' => Http::response(['count' => 1, 'releases' => [$release]]),
+            $endpoint.'/artist/*' => Http::response($artist),
+            $endpoint.'/release/*' => Http::response($release),
         ]);
         foreach (['artist' => $artist, 'album' => $release] as $type => $result) {
             $args = ['type' => $type, 'listen' => $listen->id];
@@ -410,9 +532,9 @@ class MusicBrainzApiMatchingTest extends TestCase
         $newListen = Listen::query()->latest('id')->firstOrFail();
         $this->assertSame([$artist['id']], $newListen->track_metadata['additional_info']['artist_mbids']);
         $this->assertSame($release['id'], $newListen->track_metadata['additional_info']['release_mbid']);
-        Http::assertSent(fn (Request $request) => str_starts_with($request->url(), 'https://musicbrainz.org/ws/2/artist?')
+        Http::assertSent(fn (Request $request) => str_starts_with($request->url(), $endpoint.'/artist?')
             && $request['query'] === 'artist:"Artist"' && $request->hasHeader('User-Agent'));
-        Http::assertSent(fn (Request $request) => str_starts_with($request->url(), 'https://musicbrainz.org/ws/2/release?')
+        Http::assertSent(fn (Request $request) => str_starts_with($request->url(), $endpoint.'/release?')
             && $request['query'] === 'release:"Album"');
         Http::assertSentCount(4);
     }

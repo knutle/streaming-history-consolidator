@@ -282,6 +282,37 @@ class AlbumArtworkTest extends TestCase
         Http::assertSentCount(2);
     }
 
+    public function test_mirror_release_search_keeps_cover_requests_on_cover_art_archive(): void
+    {
+        config(['artwork.enabled' => true, 'musicbrainz.api_base_url' => 'http://musicbrainz:5000/ws/2', 'musicbrainz.api_min_interval' => 0]);
+        Http::preventStrayRequests();
+        Storage::fake('local');
+        $coverUrl = 'https://coverartarchive.org/release/'.self::OTHER_RELEASE.'/front-500';
+        Http::fake([
+            'http://musicbrainz:5000/ws/2/release?*' => Http::response([
+                'count' => 1, 'releases' => [['id' => self::OTHER_RELEASE, 'title' => 'Selected album']],
+            ]),
+            'http://musicbrainz:5000/ws/2/release/'.self::OTHER_RELEASE.'?*' => Http::response([
+                'id' => self::OTHER_RELEASE, 'title' => 'Selected album',
+            ]),
+            $coverUrl => Http::response($this->image(), 200, ['Content-Type' => 'image/png']),
+        ]);
+        $listen = $this->listen(User::factory()->create());
+        $client = $this->client();
+        $this->actingAs(User::findOrFail($listen->user_id));
+
+        $this->postJson(route('artwork.search', $listen->id), ['q' => 'Selected album'])
+            ->assertOk()->assertJsonPath('results.0.mbid', self::OTHER_RELEASE);
+        $this->post(route('artwork.store', $listen->id), ['mbid' => self::OTHER_RELEASE, 'name' => 'Selected album'])
+            ->assertSessionHasNoErrors();
+        $this->assertSame(self::OTHER_RELEASE, $client->releaseForListen($listen));
+        $this->assertSame('ready', $client->cover(self::OTHER_RELEASE)['status']);
+
+        Http::assertSent(fn (Request $request) => $request->url() === $coverUrl);
+        Http::assertSentCount(3);
+        $this->assertSame(self::RECORDING, $listen->fresh()->recording_mbid);
+    }
+
     public function test_guests_other_owners_invalid_input_and_tampered_selections_are_rejected(): void
     {
         config(['artwork.enabled' => true]);

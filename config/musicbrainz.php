@@ -12,4 +12,6 @@ return [
     'enabled' => env('MUSICBRAINZ_ENABLED', $local !== null),
     'setup_path' => $setupPath,
     'format' => $local['format'] ?? 'full',
+    'api_base_url' => env('MUSICBRAINZ_API_BASE_URL', 'https://musicbrainz.org/ws/2'),
+    'api_min_interval' => env('MUSICBRAINZ_API_MIN_INTERVAL', 1.1),
 ];

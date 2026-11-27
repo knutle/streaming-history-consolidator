@@ -336,36 +336,74 @@ class MusicBrainzApi
         return preg_replace_callback('/[+\-&|!(){}\[\]^"~*?:\\\\\/]/u', fn ($match) => '\\'.$match[0], $value) ?? throw new \UnexpectedValueException('Invalid MusicBrainz search text.');
     }
 
+    /** @return array{base_url: string, interval: float, cache_prefix: string} */
+    private function settings(string $errorKey): array
+    {
+        $url = config('musicbrainz.api_base_url');
+        $parts = is_string($url) && filter_var($url, FILTER_VALIDATE_URL) !== false ? parse_url($url) : false;
+        if ($parts === false || ! isset($parts['scheme'], $parts['host'])
+            || ! in_array(strtolower($parts['scheme']), ['http', 'https'], true)
+            || isset($parts['user']) || isset($parts['pass'])
+            || isset($parts['query']) || isset($parts['fragment'])) {
+            $this->fail($errorKey, 'The configured MusicBrainz API base URL must be an HTTP(S) URL without credentials, a query, or a fragment.');
+        }
+        $scheme = strtolower($parts['scheme']);
+        $host = strtolower(rtrim($parts['host'], '.'));
+        if ($host === '') {
+            $this->fail($errorKey, 'The configured MusicBrainz API base URL must include a host.');
+        }
+        $public = $host === 'musicbrainz.org' || str_ends_with($host, '.musicbrainz.org');
+        if ($public && $scheme !== 'https') {
+            $this->fail($errorKey, 'The public MusicBrainz API requires HTTPS.');
+        }
+        $port = $parts['port'] ?? ($scheme === 'https' ? 443 : 80);
+        $defaultPort = ($scheme === 'https' && $port === 443) || ($scheme === 'http' && $port === 80);
+        $baseUrl = $scheme.'://'.$host.($defaultPort ? '' : ':'.$port).rtrim($parts['path'] ?? '', '/');
+        $interval = config('musicbrainz.api_min_interval');
+        if ((! is_int($interval) && ! is_float($interval) && ! is_string($interval))
+            || ! is_numeric($interval) || ! is_finite((float) $interval) || (float) $interval < 0
+            || (float) $interval > intdiv(PHP_INT_MAX, 1000000) - 60) {
+            $this->fail($errorKey, 'The configured MusicBrainz API interval must be a finite, non-negative number within the supported timer range.');
+        }
+
+        return [
+            'base_url' => $baseUrl,
+            'interval' => $public ? max(1.1, (float) $interval) : (float) $interval,
+            'cache_prefix' => $public ? 'musicbrainz-api' : 'musicbrainz-api-'.hash('sha256', $baseUrl),
+        ];
+    }
+
     /** @param array<string, string|int> $query
      * @return array<string, mixed>
      */
     private function get(string $path, array $query, string $errorKey, bool $background = false): array
     {
+        ['base_url' => $baseUrl, 'interval' => $interval, 'cache_prefix' => $prefix] = $this->settings($errorKey);
         try {
-            $response = Cache::lock('musicbrainz-api-lock', 30)->block(30, function () use ($path, $query, $background) {
-                $cooldown = Cache::get('musicbrainz-api-cooldown');
+            $response = Cache::lock($prefix.'-lock', max(30, (int) ceil($interval) + 20))->block(30, function () use ($path, $query, $background, $baseUrl, $interval, $prefix) {
+                $cooldown = Cache::get($prefix.'-cooldown');
                 if ($cooldown !== null && (! is_numeric($cooldown) || (float) $cooldown > microtime(true))) {
                     if (! is_numeric($cooldown)) {
                         throw new \UnexpectedValueException('Invalid MusicBrainz API cooldown timestamp.');
                     }
                     throw new MusicBrainzTemporaryException('MusicBrainz is rate-limited.', (int) ceil((float) $cooldown - microtime(true)));
                 }
-                $last = Cache::get('musicbrainz-api-last-request');
+                $last = Cache::get($prefix.'-last-request');
                 if ($last !== null && ! is_numeric($last)) {
                     throw new \UnexpectedValueException('Invalid MusicBrainz API throttle timestamp.');
                 }
                 if ($last !== null) {
-                    $delay = 1.1 - (microtime(true) - (float) $last);
+                    $delay = $interval - (microtime(true) - (float) $last);
                     if ($delay > 0) {
                         Sleep::usleep((int) ceil($delay * 1000000));
                     }
                 }
-                Cache::put('musicbrainz-api-last-request', microtime(true), 60);
+                Cache::put($prefix.'-last-request', microtime(true), max(60, (int) ceil($interval) + 1));
 
                 $response = Http::acceptJson()
                     ->withUserAgent('weftstream/1.0 (https://github.com/knutle/weftstream)')
                     ->connectTimeout(5)->timeout(15)->withoutRedirecting()
-                    ->get('https://musicbrainz.org/ws/2/'.$path, $query);
+                    ->get($baseUrl.'/'.$path, $query);
                 if (in_array($response->status(), [429, 503], true) || ($background && $response->serverError())) {
                     $header = $response->header('Retry-After');
                     $retryAfter = ctype_digit($header) ? (int) $header : 0;
@@ -377,7 +415,7 @@ class MusicBrainzApi
                         $retryAfter = max(5, $retryAfter);
                     }
                     if ($retryAfter > 0) {
-                        if (! Cache::put('musicbrainz-api-cooldown', microtime(true) + $retryAfter, $retryAfter + 1)) {
+                        if (! Cache::put($prefix.'-cooldown', microtime(true) + $retryAfter, $retryAfter + 1)) {
                             throw new \RuntimeException('Could not save the MusicBrainz API cooldown.');
                         }
                     }
