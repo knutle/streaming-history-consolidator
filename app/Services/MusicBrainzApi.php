@@ -363,7 +363,7 @@ class MusicBrainzApi
                 Cache::put('musicbrainz-api-last-request', microtime(true), 60);
 
                 $response = Http::acceptJson()
-                    ->withUserAgent('playweft/1.0 (https://github.com/knutle/streaming-history-consolidator)')
+                    ->withUserAgent('playweft/1.0 (https://github.com/knutle/playweft)')
                     ->connectTimeout(5)->timeout(15)->withoutRedirecting()
                     ->get('https://musicbrainz.org/ws/2/'.$path, $query);
                 if (in_array($response->status(), [429, 503], true) || ($background && $response->serverError())) {
