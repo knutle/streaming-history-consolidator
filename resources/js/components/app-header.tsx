@@ -96,12 +96,12 @@ const mainNavItems: NavItem[] = [...primaryNavItems, ...overflowNavItems];
 const rightNavItems: NavItem[] = [
     {
         title: 'Repository',
-        href: 'https://github.com/knutle/playweft',
+        href: 'https://github.com/knutle/weftstream',
         icon: Folder,
     },
     {
         title: 'Documentation',
-        href: 'https://github.com/knutle/playweft/blob/main/README.md',
+        href: 'https://github.com/knutle/weftstream/blob/main/README.md',
         icon: BookOpen,
     },
 ];

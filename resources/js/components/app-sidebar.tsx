@@ -66,12 +66,12 @@ const mainNavItems: NavItem[] = [
 const footerNavItems: NavItem[] = [
     {
         title: 'Repository',
-        href: 'https://github.com/knutle/playweft',
+        href: 'https://github.com/knutle/weftstream',
         icon: FolderGit2,
     },
     {
         title: 'Documentation',
-        href: 'https://github.com/knutle/playweft/blob/main/README.md',
+        href: 'https://github.com/knutle/weftstream/blob/main/README.md',
         icon: BookOpen,
     },
 ];

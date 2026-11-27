@@ -1,4 +1,4 @@
-# playweft
+# weftstream
 
 A streaming history consolidator.
 
@@ -48,7 +48,7 @@ npm install
 
 The local Sail stack provides the app, MySQL, Redis, Mailpit, and Selenium. The example configuration serves the app at [http://localhost:8000](http://localhost:8000).
 
-Existing installations can set `APP_NAME=playweft` in their environment for notifications and other server-side branding. Changing it may also change default session cookie and cache prefixes.
+Existing installations can set `APP_NAME=weftstream` in their environment for notifications and other server-side branding. Before changing it, explicitly set `SESSION_COOKIE`, `CACHE_PREFIX`, and `REDIS_PREFIX` to their existing effective values to preserve sessions, cached data, and Redis-backed queues. Run `php artisan config:clear` and gracefully restart queue workers after updating the environment; do not flush shared caches.
 
 Start the frontend development server in a separate terminal:
 

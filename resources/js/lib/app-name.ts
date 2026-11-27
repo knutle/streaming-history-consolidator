@@ -1,1 +1,1 @@
-export const appName = 'playweft';
+export const appName = 'weftstream';

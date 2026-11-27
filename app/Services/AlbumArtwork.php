@@ -182,7 +182,7 @@ class AlbumArtwork
                 throw new \RuntimeException('Unsafe artwork redirect destination.');
             }
             $address = $this->publicAddress($host);
-            $response = Http::withUserAgent('playweft/1.0 (https://github.com/knutle/playweft)')
+            $response = Http::withUserAgent('weftstream/1.0 (https://github.com/knutle/weftstream)')
                 ->connectTimeout(3)->timeout(12)->withoutRedirecting()
                 ->setHandler(new CurlHandler)
                 ->withOptions(['proxy' => '', 'decode_content' => false, 'progress' => function (float $total, float $downloaded): void {
