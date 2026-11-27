@@ -28,10 +28,13 @@ class ManualListenMatcher
         return $value === null ? null : json_decode($value, true, 512, JSON_THROW_ON_ERROR);
     }
 
-    /** @param array{recording_mbid: string, artist_name: string, artist_mbids: list<string>, artist_names?: array<string, string>, release_mbid: null} $match */
-    public function replace(User $user, Listen $listen, array $match, string $previousRecordingMbid, ?string $recordingName = null): int
+    /**
+     * @param  array{recording_mbid: string, artist_name: string, artist_mbids: list<string>, artist_names?: array<string, string>, release_mbid: null}  $match
+     * @param  (\Closure(Listen): void)|null  $checkCandidate
+     */
+    public function replace(User $user, Listen $listen, array $match, string $previousRecordingMbid, ?string $recordingName = null, ?string $artistCredit = null, ?\Closure $checkCandidate = null): int
     {
-        return DB::transaction(function () use ($user, $listen, $match, $previousRecordingMbid, $recordingName): int {
+        return DB::transaction(function () use ($user, $listen, $match, $previousRecordingMbid, $recordingName, $artistCredit, $checkCandidate): int {
             DB::table('users')->where('id', $user->id)->lockForUpdate()->first();
             $current = Listen::query()->where('user_id', $user->id)->find($listen->id);
             if ($current === null || $current->recording_mbid !== $previousRecordingMbid
@@ -45,9 +48,10 @@ class ManualListenMatcher
 
             $songKey = $this->key($current->track_name, $current->artist_name);
             $catalogKeys = [];
-            Listen::query()->where('user_id', $user->id)->chunkById(500, function ($listens) use ($songKey, &$catalogKeys): void {
+            Listen::query()->where('user_id', $user->id)->chunkById(500, function ($listens) use ($songKey, $artistCredit, &$catalogKeys): void {
                 foreach ($listens as $candidate) {
-                    if ($this->key($candidate->track_name, $candidate->artist_name) === $songKey) {
+                    if ($this->key($candidate->track_name, $candidate->artist_name) === $songKey
+                        && ($artistCredit === null || $candidate->artist_name === $artistCredit)) {
                         $catalogKey = $this->catalogGroups->nativeKey($candidate);
                         if ($catalogKey !== null) {
                             $catalogKeys[$catalogKey] = true;
@@ -60,11 +64,15 @@ class ManualListenMatcher
             $remembered = [];
             $updated = 0;
             $this->matchedMetadata->rememberArtistNames($match['artist_names'] ?? []);
-            Listen::query()->where('user_id', $user->id)->chunkById(500, function ($listens) use ($user, $songKey, $catalogKeys, $saved, $match, $previousRecordingMbid, $recordingName, &$remembered, &$updated): void {
+            Listen::query()->where('user_id', $user->id)->chunkById(500, function ($listens) use ($user, $songKey, $artistCredit, $catalogKeys, $saved, $match, $previousRecordingMbid, $recordingName, $checkCandidate, &$remembered, &$updated): void {
                 foreach ($listens as $candidate) {
                     $key = $this->key($candidate->track_name, $candidate->artist_name);
-                    if ($key !== $songKey && ! isset($catalogKeys[$this->catalogGroups->nativeKey($candidate)])) {
+                    $sameSong = $key === $songKey && ($artistCredit === null || $candidate->artist_name === $artistCredit);
+                    if (! $sameSong && ! isset($catalogKeys[$this->catalogGroups->nativeKey($candidate)])) {
                         continue;
+                    }
+                    if ($checkCandidate !== null) {
+                        $checkCandidate($candidate);
                     }
                     if (! in_array($candidate->recording_mbid, [null, $previousRecordingMbid, $match['recording_mbid']], true)) {
                         throw ValidationException::withMessages(['recording_mbid' => 'An affected listen has a conflicting recording. Resolve or unlink it before re-matching. No matches were changed.']);
@@ -86,7 +94,7 @@ class ManualListenMatcher
                     }
                 }
             });
-            $updated += $this->catalogGroups->linkMatching($user, $this, [$match['recording_mbid']])['matched'];
+            $updated += $this->catalogGroups->linkMatching($user, $this, [$match['recording_mbid']], checkCandidate: $checkCandidate)['matched'];
 
             return $updated;
         });
@@ -105,10 +113,13 @@ class ManualListenMatcher
         );
     }
 
-    /** @param array{recording_mbid: string, artist_name: string, artist_mbids: list<string>, artist_names?: array<string, string>, release_mbid: null} $match */
-    public function remember(User $user, Listen $listen, array $match, ?string $recordingName = null): int
+    /**
+     * @param  array{recording_mbid: string, artist_name: string, artist_mbids: list<string>, artist_names?: array<string, string>, release_mbid: null}  $match
+     * @param  (\Closure(Listen): void)|null  $checkCandidate
+     */
+    public function remember(User $user, Listen $listen, array $match, ?string $recordingName = null, ?string $artistCredit = null, ?\Closure $checkCandidate = null): int
     {
-        return DB::transaction(function () use ($user, $listen, $match, $recordingName) {
+        return DB::transaction(function () use ($user, $listen, $match, $recordingName, $artistCredit, $checkCandidate) {
             DB::table('users')->where('id', $user->id)->lockForUpdate()->first();
             if (! Listen::query()->where('user_id', $user->id)->whereKey($listen->id)->whereNull('recording_mbid')->exists()) {
                 throw ValidationException::withMessages(['recording_mbid' => 'This listen has already been identified or deleted.']);
@@ -121,10 +132,14 @@ class ManualListenMatcher
             $groups = [];
             $catalogGroups = [];
             Listen::query()->where('user_id', $user->id)->whereNull('recording_mbid')
-                ->chunkById(500, function ($listens) use ($key, $match, $recordingName, &$updated, &$groups, &$catalogGroups) {
+                ->chunkById(500, function ($listens) use ($key, $artistCredit, $match, $recordingName, $checkCandidate, &$updated, &$groups, &$catalogGroups) {
                     foreach ($listens as $candidate) {
-                        if ($this->key($candidate->track_name, $candidate->artist_name) !== $key) {
+                        if ($this->key($candidate->track_name, $candidate->artist_name) !== $key
+                            || ($artistCredit !== null && $candidate->artist_name !== $artistCredit)) {
                             continue;
+                        }
+                        if ($checkCandidate !== null) {
+                            $checkCandidate($candidate);
                         }
                         $metadata = $candidate->track_metadata;
                         $metadata['additional_info']['recording_mbid'] = $match['recording_mbid'];
@@ -149,9 +164,9 @@ class ManualListenMatcher
                 });
 
             foreach ($groups as $candidate) {
-                $updated += $this->catalogGroups->recordMatch($user, $candidate, $match);
+                $updated += $this->catalogGroups->recordMatch($user, $candidate, $match, $checkCandidate);
             }
-            $updated += $this->catalogGroups->linkMatching($user, $this, [$match['recording_mbid']])['matched'];
+            $updated += $this->catalogGroups->linkMatching($user, $this, [$match['recording_mbid']], checkCandidate: $checkCandidate)['matched'];
 
             return $updated;
         });

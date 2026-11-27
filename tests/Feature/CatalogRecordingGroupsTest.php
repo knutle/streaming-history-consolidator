@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Jobs\ScanArtistRecordings;
 use App\Models\Listen;
 use App\Models\User;
 use App\Services\CatalogMatcher;
@@ -12,6 +13,8 @@ use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Queue;
+use Illuminate\Support\Sleep;
 use Inertia\Testing\AssertableInertia as Assert;
 use PHPUnit\Framework\Attributes\TestWith;
 use Tests\TestCase;
@@ -39,6 +42,51 @@ class CatalogRecordingGroupsTest extends TestCase
                 'additional_info' => ['catalogs' => [$source => $catalog]],
             ],
         ]);
+    }
+
+    #[TestWith([false])]
+    #[TestWith([true])]
+    public function test_artist_rematching_respects_queued_state_of_linked_catalogs_outside_the_artist_group(bool $changed): void
+    {
+        Queue::fake();
+        Http::preventStrayRequests();
+        Sleep::fake();
+        $user = User::factory()->create();
+        $old = '11111111-1111-4111-8111-111111111111';
+        $replacement = '44444444-4444-4444-8444-444444444444';
+        $artist = '55555555-5555-4555-8555-555555555555';
+        $apple = $this->listen($user, 'apple', '123', 'Track', 1, $old);
+        $spotify = $this->listen($user, 'spotify', '0123456789ABCDEFGHIJKL', 'Track variation', 2);
+        $spotify->update(['artist_name' => 'Other imported credit']);
+        $this->actingAs($user)->post(route('listens.merge', $apple->id), ['other_listen' => $spotify->id])->assertSessionHasNoErrors();
+        Http::fake([
+            'musicbrainz.org/ws/2/artist/*' => Http::response(['id' => $artist, 'name' => 'Replacement artist', 'aliases' => []]),
+            'musicbrainz.org/ws/2/recording?*' => Http::response(['count' => 1, 'recordings' => [[
+                'id' => $replacement, 'title' => 'Track',
+                'artist-credit' => [['artist' => ['id' => $artist, 'name' => 'Replacement artist']]],
+                'releases' => [['title' => 'Album']],
+            ]]]),
+        ]);
+        $this->post(route('music-entities.musicbrainz', ['type' => 'artist', 'listen' => $apple->id]), [
+            'mbid' => $artist, 'name' => 'Replacement artist', 'search_source' => 'api', 'scan_source' => 'api',
+            'rematch_existing' => 1, 'expected_artist_snapshot' => app(ManualMusicEntityMatcher::class)->artistSnapshot($apple),
+        ])->assertSessionHasNoErrors();
+        if ($changed) {
+            $spotify->refresh()->update(['recording_mbid' => null]);
+        }
+
+        app()->call([new ScanArtistRecordings(DB::table('artist_recording_scans')->sole()->id), 'handle']);
+
+        $this->assertSame($changed ? $old : $replacement, $apple->fresh()->recording_mbid);
+        $this->assertSame($changed ? null : $replacement, $spotify->fresh()->recording_mbid);
+        $this->assertSame('Other imported credit', $spotify->fresh()->artist_name);
+        $this->assertSame($artist, app(ManualMusicEntityMatcher::class)->artistMbid($user, 'Artist'));
+        $this->assertNull(app(ManualMusicEntityMatcher::class)->artistMbid($user, 'Other imported credit'));
+        $this->assertSame($changed ? $old : $replacement, json_decode(DB::table('catalog_recording_groups')->sole()->recording_match, true)['recording_mbid']);
+        $this->assertDatabaseHas('artist_recording_scans', [
+            'status' => 'completed', 'processed' => 1, 'matched' => $changed ? 0 : 2, 'conflicts' => $changed ? 1 : 0,
+        ]);
+        Sleep::fake(false);
     }
 
     public function test_linking_keeps_plays_and_all_catalog_sources_in_editor_evidence(): void

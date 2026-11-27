@@ -59,6 +59,20 @@ class CatalogRecordingGroups
     }
 
     /**
+     * @param  list<string>  $keys
+     * @return list<string>
+     */
+    public function linkedKeys(User $user, array $keys): array
+    {
+        $groupIds = DB::table('catalog_recording_members')->where('user_id', $user->id)
+            ->whereIn('catalog_key', $keys)->distinct()->pluck('group_id');
+        $members = DB::table('catalog_recording_members')->where('user_id', $user->id)
+            ->whereIn('group_id', $groupIds)->pluck('catalog_key')->all();
+
+        return array_values(array_unique([...$keys, ...$members]));
+    }
+
+    /**
      * The caller must hold the user's row lock inside a transaction.
      *
      * @param  list<string>  $keys
@@ -77,12 +91,10 @@ class CatalogRecordingGroups
             }
         }
         $groups->update(['recording_match' => json_encode($match, JSON_THROW_ON_ERROR), 'updated_at' => now()]);
-        $members = DB::table('catalog_recording_members')->where('user_id', $user->id)
-            ->whereIn('group_id', $groupIds)->pluck('catalog_key')->all();
         $this->matches = [];
         $this->loaded = [];
 
-        return array_values(array_unique([...$keys, ...$members]));
+        return $this->linkedKeys($user, $keys);
     }
 
     /** @return list<array{id: int, catalog: array<string, mixed>}> */
@@ -297,8 +309,11 @@ class CatalogRecordingGroups
         });
     }
 
-    /** @param array{recording_mbid: string, artist_name: string, artist_mbids: list<string>, release_mbid: null} $match */
-    public function recordMatch(User $user, Listen $listen, array $match): int
+    /**
+     * @param  array{recording_mbid: string, artist_name: string, artist_mbids: list<string>, release_mbid: null}  $match
+     * @param  (\Closure(Listen): void)|null  $checkCandidate
+     */
+    public function recordMatch(User $user, Listen $listen, array $match, ?\Closure $checkCandidate = null): int
     {
         $groupId = $this->groupId($listen);
         if ($groupId === null) {
@@ -306,7 +321,7 @@ class CatalogRecordingGroups
         }
         $keys = array_fill_keys(DB::table('catalog_recording_members')->where('user_id', $user->id)->where('group_id', $groupId)->pluck('catalog_key')->all(), true);
         $updated = 0;
-        Listen::query()->where('user_id', $user->id)->chunkById(500, function ($listens) use ($keys, $match, &$updated): void {
+        Listen::query()->where('user_id', $user->id)->chunkById(500, function ($listens) use ($keys, $match, $checkCandidate, &$updated): void {
             foreach ($listens as $candidate) {
                 $catalog = $this->native($candidate);
                 if ($catalog === null || ! isset($keys[$this->key($candidate->source, $catalog['id'])])) {
@@ -317,6 +332,9 @@ class CatalogRecordingGroups
                 }
                 if ($candidate->recording_mbid !== null) {
                     continue;
+                }
+                if ($checkCandidate !== null) {
+                    $checkCandidate($candidate);
                 }
                 $metadata = $candidate->track_metadata;
                 $metadata['additional_info']['recording_mbid'] = $match['recording_mbid'];
@@ -361,15 +379,16 @@ class CatalogRecordingGroups
     /**
      * @param  list<string>|null  $recordingMbids
      * @param  (\Closure(): void)|null  $checkAbort
+     * @param  (\Closure(Listen): void)|null  $checkCandidate
      * @return array{linked: int, matched: int}
      */
-    public function linkMatching(User $user, ManualListenMatcher $manual, ?array $recordingMbids = null, ?\Closure $checkAbort = null): array
+    public function linkMatching(User $user, ManualListenMatcher $manual, ?array $recordingMbids = null, ?\Closure $checkAbort = null, ?\Closure $checkCandidate = null): array
     {
         if ($recordingMbids === []) {
             return ['linked' => 0, 'matched' => 0];
         }
 
-        return DB::transaction(function () use ($user, $manual, $recordingMbids, $checkAbort): array {
+        return DB::transaction(function () use ($user, $manual, $recordingMbids, $checkAbort, $checkCandidate): array {
             DB::table('users')->where('id', $user->id)->lockForUpdate()->first();
             $targets = $recordingMbids === null ? null : array_fill_keys($recordingMbids, true);
             $savedMatches = DB::table('listen_matches')->where('user_id', $user->id)->pluck('match', 'song_key');
@@ -511,7 +530,7 @@ class CatalogRecordingGroups
             $matched = 0;
             if ($linked > 0) {
                 Listen::query()->where('user_id', $user->id)->whereNull('recording_mbid')
-                    ->chunkById(500, function ($listens) use ($members, $changedGroups, $groupMatches, $checkAbort, &$matched): void {
+                    ->chunkById(500, function ($listens) use ($members, $changedGroups, $groupMatches, $checkAbort, $checkCandidate, &$matched): void {
                         if ($checkAbort !== null) {
                             $checkAbort();
                         }
@@ -525,6 +544,9 @@ class CatalogRecordingGroups
                                 continue;
                             }
                             $match = $groupMatches[$groupId];
+                            if ($checkCandidate !== null) {
+                                $checkCandidate($listen);
+                            }
                             $metadata = $listen->track_metadata;
                             $metadata['additional_info']['recording_mbid'] = $match['recording_mbid'];
                             if ($match['artist_mbids'] !== []) {

@@ -15,6 +15,8 @@ import { catalog, manage, musicbrainz, remove } from '@/routes/music-entities';
 
 type Props = ArtworkProps & {
     type: 'artist' | 'album';
+    rematching: boolean;
+    artistSnapshot: string | null;
     item: {
         listen_id: number;
         artist_name: string;
@@ -46,6 +48,9 @@ type Props = ArtworkProps & {
         processed: number;
         matched: number;
         error: string | null;
+        rematch_existing: boolean | 0 | 1;
+        unresolved: number;
+        conflicts: number;
     } | null;
     musicBrainzSeed: {
         action: string;
@@ -55,13 +60,17 @@ type Props = ArtworkProps & {
 };
 
 function PollArtistScan() {
-    usePoll(3000, { only: ['artistScan'] });
+    usePoll(3000, {
+        only: ['artistScan', 'matched', 'listens', 'artistSnapshot'],
+    });
 
     return null;
 }
 
 export default function ManageMusicEntity({
     type,
+    rematching,
+    artistSnapshot,
     item,
     canMatch,
     saved,
@@ -140,8 +149,20 @@ export default function ManageMusicEntity({
                             )}
                             Artist recording scan: {artistScan.status} ·{' '}
                             {artistScan.processed} checked ·{' '}
-                            {artistScan.matched} listens matched (
-                            {artistScan.source}).
+                            {artistScan.matched} listens{' '}
+                            {artistScan.rematch_existing
+                                ? 'updated'
+                                : 'matched'}{' '}
+                            ({artistScan.source}).
+                            {!!artistScan.rematch_existing && (
+                                <p>
+                                    {artistScan.unresolved} checks without a
+                                    unique recording · {artistScan.conflicts}{' '}
+                                    conflicting or changed choices skipped.
+                                    Unresolved recordings are retained. The
+                                    artist association remains updated.
+                                </p>
+                            )}
                             {artistScan.error && <p>{artistScan.error}</p>}
                             {artistScan.status === 'queued' && (
                                 <p>
@@ -217,7 +238,11 @@ export default function ManageMusicEntity({
                     </p>
                 </section>
                 <section className="rounded-xl border border-emerald-200 bg-emerald-50/40 p-5 sm:p-6 dark:border-emerald-900 dark:bg-emerald-950/15">
-                    <h2 className="text-lg font-semibold">Match MusicBrainz</h2>
+                    <h2 className="text-lg font-semibold">
+                        {rematching
+                            ? 'Re-match MusicBrainz artist'
+                            : 'Match MusicBrainz'}
+                    </h2>
                     {musicBrainzSeed && (
                         <div className="mt-3 text-sm">
                             <form
@@ -281,10 +306,23 @@ export default function ManageMusicEntity({
                     {type === 'artist' && (
                         <p className="mt-2 text-sm text-muted-foreground">
                             Selecting an artist queues a scan of its unmatched
-                            listens. The local scan is offline. Choosing API
-                            fallback also sends unmatched track and album names
-                            to MusicBrainz; only unambiguous exact matches are
+                            listens, plus existing recordings if re-evaluation
+                            is enabled. The local scan is offline. Choosing API
+                            fallback sends the checked track and album names to
+                            MusicBrainz; only unambiguous exact matches are
                             applied.
+                        </p>
+                    )}
+                    {type === 'artist' && (
+                        <p className="mt-2 text-sm text-muted-foreground">
+                            Enable recording re-evaluation to check existing
+                            matches too. Only an unambiguous exact track and
+                            album match for the selected artist replaces a
+                            recording. Matching plays and linked catalog tracks
+                            share a correction; conflicting saved or linked
+                            choices and changes made after queuing are retained
+                            and reported. The artist choice still applies if a
+                            recording cannot be replaced.
                         </p>
                     )}
                     {!musicbrainzEnabled && searchSource === 'local' && (
@@ -297,6 +335,9 @@ export default function ManageMusicEntity({
                         {...manage.form(args)}
                         className="mt-3 flex flex-wrap items-end gap-2"
                     >
+                        {rematching && (
+                            <input type="hidden" name="rematch" value="1" />
+                        )}
                         <div className="grid gap-2">
                             <Label htmlFor="q">
                                 Name (local search uses a prefix)
@@ -333,6 +374,12 @@ export default function ManageMusicEntity({
                     <InputError message={errors.q} />
                     <InputError message={errors.mbid} />
                     <InputError message={errors.name} />
+                    <InputError
+                        message={
+                            errors.expected_artist_snapshot ??
+                            errors.rematch_existing
+                        }
+                    />
                     <InputError message={errors.page ?? errors.search_source} />
                     {apiError && (
                         <p
@@ -372,7 +419,18 @@ export default function ManageMusicEntity({
                                         {suggestion.mbid}
                                     </a>
                                 </div>
-                                <Form {...musicbrainz.form(args)}>
+                                <Form
+                                    {...musicbrainz.form(args)}
+                                    onBefore={() =>
+                                        type !== 'artist' ||
+                                        (!rematching &&
+                                            matched.length === 0 &&
+                                            !saved?.mbid) ||
+                                        window.confirm(
+                                            `Replace the artist association for "${item.artist_name}" with "${suggestion.name}"? If recording re-evaluation is enabled, safe recording replacements will also be applied; unresolved or conflicting recordings will be retained.`,
+                                        )
+                                    }
+                                >
                                     {({ processing }) => (
                                         <>
                                             <input
@@ -390,6 +448,13 @@ export default function ManageMusicEntity({
                                                 name="search_source"
                                                 value={searchSource}
                                             />
+                                            {type === 'artist' && (
+                                                <input
+                                                    type="hidden"
+                                                    name="expected_artist_snapshot"
+                                                    value={artistSnapshot ?? ''}
+                                                />
+                                            )}
                                             {type === 'artist' && (
                                                 <label className="mr-2">
                                                     <span className="sr-only">
@@ -409,13 +474,29 @@ export default function ManageMusicEntity({
                                                     </select>
                                                 </label>
                                             )}
+                                            {type === 'artist' && (
+                                                <label className="mr-2 flex items-center gap-2">
+                                                    <input
+                                                        type="checkbox"
+                                                        name="rematch_existing"
+                                                        value="1"
+                                                        defaultChecked={
+                                                            rematching
+                                                        }
+                                                    />
+                                                    Re-evaluate existing
+                                                    recordings
+                                                </label>
+                                            )}
                                             <Button
                                                 size="sm"
                                                 disabled={
                                                     processing || !canMatch
                                                 }
                                             >
-                                                Select
+                                                {rematching
+                                                    ? 'Replace artist'
+                                                    : 'Select'}
                                             </Button>
                                         </>
                                     )}
@@ -432,6 +513,7 @@ export default function ManageMusicEntity({
                                         q: search,
                                         page: searchPage - 1,
                                         search_source: searchSource,
+                                        rematch: rematching ? 1 : undefined,
                                     },
                                 })}
                             >
@@ -446,6 +528,7 @@ export default function ManageMusicEntity({
                                         q: search,
                                         page: searchPage + 1,
                                         search_source: searchSource,
+                                        rematch: rematching ? 1 : undefined,
                                     },
                                 })}
                             >

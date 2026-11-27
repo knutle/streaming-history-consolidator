@@ -8,6 +8,7 @@ use App\Models\User;
 use App\Services\ArtistAliases;
 use App\Services\CatalogMatcher;
 use App\Services\CatalogRecordingGroups;
+use App\Services\ManualMusicEntityMatcher;
 use Illuminate\Database\Schema\Blueprint;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\UploadedFile;
@@ -728,6 +729,53 @@ class ListenImportTest extends TestCase
         $this->assertArrayNotHasKey('release_mbid', $listen->fresh()->track_metadata['additional_info']);
         $this->assertDatabaseMissing('listen_artists', ['listen_id' => $listen->id]);
         $this->assertDatabaseMissing('listen_releases', ['listen_id' => $listen->id]);
+    }
+
+    public function test_artist_rematching_uses_the_selected_local_artist_id_and_keeps_other_exact_credit_groups_unchanged(): void
+    {
+        Http::preventStrayRequests();
+        $this->musicbrainz();
+        $user = User::factory()->create();
+        $this->actingAs($user)->post(route('listens.import'), [
+            'source' => 'spotify', 'file' => $this->spotify([
+                $this->row('2024-01-01T12:00:00Z'), $this->row('2024-01-02T12:00:00Z'),
+                $this->row('2024-01-03T12:00:00Z', artist: 'artist'),
+            ]),
+        ])->assertSessionHasNoErrors();
+        $listen = Listen::query()->oldest('id')->firstOrFail();
+        $old = $listen->recording_mbid;
+        $fingerprint = $listen->fingerprint;
+        $caseVariant = Listen::query()->latest('id')->firstOrFail();
+        $db = DB::connection('musicbrainz');
+        $artist = '55555555-5555-4555-8555-555555555555';
+        $recording = '44444444-4444-4444-8444-444444444444';
+        $db->table('artist_credit')->insert(['id' => 2, 'name' => 'Artist']);
+        $db->table('artist')->insert(['id' => 2, 'gid' => $artist, 'name' => 'Artist']);
+        $db->table('artist_credit_name')->insert(['artist_credit' => 2, 'artist' => 2, 'position' => 0]);
+        $db->table('recording')->insert(['id' => 2, 'gid' => $recording, 'name' => 'Track', 'artist_credit' => 2]);
+        $db->table('track')->insert(['recording' => 2, 'medium' => 1]);
+        $args = ['type' => 'artist', 'listen' => $listen->id];
+        $values = ['mbid' => $artist, 'name' => 'Artist'];
+        $this->post(route('music-entities.musicbrainz', $args), $values)->assertSessionHasNoErrors();
+        $scan = DB::table('artist_recording_scans')->latest('id')->sole();
+        app()->call([new ScanArtistRecordings($scan->id), 'handle']);
+        $this->assertSame($old, $listen->fresh()->recording_mbid);
+
+        $this->post(route('music-entities.musicbrainz', $args), $values + [
+            'rematch_existing' => 1, 'expected_artist_snapshot' => app(ManualMusicEntityMatcher::class)->artistSnapshot($listen),
+        ])->assertSessionHasNoErrors();
+        $this->assertSame($old, $listen->fresh()->recording_mbid);
+        $scanId = DB::table('artist_recording_scans')->latest('id')->value('id');
+        app()->call([new ScanArtistRecordings($scanId), 'handle']);
+
+        $this->assertSame($recording, $listen->fresh()->recording_mbid);
+        $this->assertSame($fingerprint, $listen->fresh()->fingerprint);
+        $this->assertSame('Artist', $listen->fresh()->artist_name);
+        $this->assertSame([$artist], $listen->fresh()->track_metadata['additional_info']['artist_mbids']);
+        $this->assertSame($old, $caseVariant->fresh()->recording_mbid);
+        $this->assertSame(['11111111-1111-4111-8111-111111111111'], $caseVariant->fresh()->track_metadata['additional_info']['artist_mbids']);
+        $this->assertDatabaseHas('artist_recording_scans', ['id' => $scanId, 'status' => 'completed', 'matched' => 2, 'processed' => 2, 'unresolved' => 0, 'conflicts' => 0]);
+        Http::assertNothingSent();
     }
 
     public function test_reimport_identifies_a_previously_unmatched_listen(): void

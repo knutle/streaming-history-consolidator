@@ -33,6 +33,42 @@ class ManualMusicEntityMatcher
         return $this->cache[$cacheKey]?->mbid;
     }
 
+    public function artistSnapshot(Listen $listen): string
+    {
+        $mbids = $this->related('artist', $listen)->join('listen_artists', 'listen_artists.listen_id', '=', 'listens.id')
+            ->join('music_artists', 'music_artists.id', '=', 'listen_artists.music_artist_id')
+            ->distinct()->orderBy('music_artists.mbid')->pluck('music_artists.mbid')->all();
+        $saved = DB::table('music_entity_matches')->where([
+            'user_id' => $listen->user_id, 'type' => 'artist', 'entity_key' => $this->key('artist', $listen),
+        ])->value('mbid');
+
+        return hash('sha256', json_encode([$listen->artist_name, $mbids, $saved], JSON_THROW_ON_ERROR));
+    }
+
+    /** @return list<array{id: int, track_name: string, artist_name: string, release_name: ?string, recording_mbid: ?string}> */
+    public function recordingSnapshot(Listen $listen, CatalogRecordingGroups $groups): array
+    {
+        $keys = [];
+        foreach ($this->related('artist', $listen)->lazyById(500) as $candidate) {
+            $key = $groups->nativeKey($candidate);
+            if ($key !== null) {
+                $keys[$key] = true;
+            }
+        }
+        $keys = array_fill_keys($groups->linkedKeys(User::query()->findOrFail($listen->user_id), array_keys($keys)), true);
+        $snapshot = [];
+        foreach (Listen::query()->where('user_id', $listen->user_id)->lazyById(500) as $candidate) {
+            if ($candidate->artist_name === $listen->artist_name || isset($keys[$groups->nativeKey($candidate)])) {
+                $snapshot[] = [
+                    'id' => $candidate->id, 'track_name' => $candidate->track_name, 'artist_name' => $candidate->artist_name,
+                    'release_name' => $candidate->release_name, 'recording_mbid' => $candidate->recording_mbid,
+                ];
+            }
+        }
+
+        return $snapshot;
+    }
+
     /** @return Builder<Listen> */
     public function related(string $type, Listen $listen): Builder
     {

@@ -7,6 +7,9 @@ use App\Jobs\ProcessRecordingAssociation;
 use App\Jobs\ScanArtistRecordings;
 use App\Models\Listen;
 use App\Models\User;
+use App\Services\ManualListenMatcher;
+use App\Services\ManualMusicEntityMatcher;
+use GuzzleHttp\Promise\PromiseInterface;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Http\Client\Request;
 use Illuminate\Http\UploadedFile;
@@ -524,6 +527,84 @@ class MusicBrainzApiMatchingTest extends TestCase
         Http::assertSent(fn (Request $request) => str_contains($request->url(), '/ws/2/recording?')
             && $request['query'] === 'recording:"Song" AND arid:11111111-1111-4111-8111-111111111111 AND release:"Album"');
         Http::assertSentCount(4);
+    }
+
+    public function test_artist_api_rematching_updates_safe_recordings_and_reports_ambiguous_conflicting_and_stale_choices(): void
+    {
+        Http::preventStrayRequests();
+        Sleep::fake();
+        $listen = $this->importedListen();
+        $user = User::query()->findOrFail($listen->user_id);
+        $old = '33333333-3333-4333-8333-333333333333';
+        $conflicting = '99999999-9999-4999-8999-999999999999';
+        $listen->update(['recording_mbid' => $old]);
+        $others = [];
+        foreach (['Ambiguous', 'Conflict', 'Changed', 'Wrong release'] as $title) {
+            $others[$title] = Listen::query()->create([
+                'user_id' => $user->id, 'source' => 'spotify', 'fingerprint' => hash('sha256', $title),
+                'track_name' => $title, 'artist_name' => 'Artist', 'release_name' => 'Album',
+                'listened_at' => 1700000000, 'played_ms' => 60000, 'recording_mbid' => $old,
+                'track_metadata' => ['track_name' => $title, 'artist_name' => 'Artist', 'additional_info' => []],
+            ]);
+        }
+        $foreign = $listen->replicate()->fill(['user_id' => User::factory()->create()->id]);
+        $foreign->save();
+        DB::table('listen_matches')->insert([
+            'user_id' => $user->id, 'song_key' => app(ManualListenMatcher::class)->key('Conflict', 'Artist'),
+            'match' => json_encode(['recording_mbid' => $conflicting], JSON_THROW_ON_ERROR),
+            'created_at' => now(), 'updated_at' => now(),
+        ]);
+        Http::fake([
+            'musicbrainz.org/ws/2/artist/*' => Http::response([
+                'id' => '11111111-1111-4111-8111-111111111111', 'name' => 'Replacement artist', 'aliases' => [],
+            ]),
+            'musicbrainz.org/ws/2/recording?*' => function (Request $request): PromiseInterface {
+                $recording = $this->recording();
+                $recording['releases'] = [['title' => 'Album']];
+                if (str_contains($request['query'], 'Ambiguous')) {
+                    $recording['title'] = 'Ambiguous';
+                    $second = $recording;
+                    $second['id'] = '44444444-4444-4444-8444-444444444444';
+
+                    return Http::response(['count' => 2, 'recordings' => [$recording, $second]]);
+                }
+                foreach (['Conflict', 'Changed', 'Wrong release'] as $title) {
+                    if (str_contains($request['query'], $title)) {
+                        $recording['title'] = $title;
+                    }
+                }
+                if ($recording['title'] === 'Wrong release') {
+                    $recording['releases'] = [['title' => 'Different album']];
+                }
+
+                return Http::response(['count' => 1, 'recordings' => [$recording]]);
+            },
+        ]);
+        $args = ['type' => 'artist', 'listen' => $listen->id];
+        $this->post(route('music-entities.musicbrainz', $args), [
+            'mbid' => '11111111-1111-4111-8111-111111111111', 'name' => 'Replacement artist',
+            'search_source' => 'api', 'scan_source' => 'api', 'rematch_existing' => 1,
+            'expected_artist_snapshot' => app(ManualMusicEntityMatcher::class)->artistSnapshot($listen),
+        ])->assertSessionHasNoErrors();
+        $this->assertSame($old, $listen->fresh()->recording_mbid);
+        $others['Changed']->update(['recording_mbid' => $conflicting]);
+        $scanId = DB::table('artist_recording_scans')->sole()->id;
+        app()->call([new ScanArtistRecordings($scanId), 'handle']);
+
+        $this->assertSame($this->recording()['id'], $listen->fresh()->recording_mbid);
+        $this->assertSame($old, $others['Ambiguous']->fresh()->recording_mbid);
+        $this->assertSame($old, $others['Conflict']->fresh()->recording_mbid);
+        $this->assertSame($conflicting, $others['Changed']->fresh()->recording_mbid);
+        $this->assertSame($old, $others['Wrong release']->fresh()->recording_mbid);
+        $this->assertSame($old, $foreign->fresh()->recording_mbid);
+        foreach ([$listen, ...array_values($others)] as $item) {
+            $this->assertSame(['11111111-1111-4111-8111-111111111111'], $item->fresh()->track_metadata['additional_info']['artist_mbids']);
+        }
+        $this->assertSame($this->recording()['id'], app(ManualListenMatcher::class)->remembered($user, 'Song', 'Artist')['recording_mbid']);
+        $this->get(route('music-entities.manage', $args))->assertInertia(fn (Assert $page) => $page
+            ->where('artistScan.status', 'completed')->where('artistScan.processed', 5)
+            ->where('artistScan.matched', 1)->where('artistScan.unresolved', 2)->where('artistScan.conflicts', 2));
+        Http::assertSentCount(6);
     }
 
     public function test_failed_and_superseded_artist_scans_are_visible_and_do_not_apply_matches(): void

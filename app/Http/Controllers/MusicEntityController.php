@@ -70,6 +70,7 @@ class MusicEntityController extends Controller
         $values = $request->validate([
             'q' => ['nullable', 'string', 'max:255'], 'page' => ['nullable', 'integer', 'min:1', 'max:1000'],
             'search_source' => ['nullable', Rule::in(['local', 'api'])],
+            'rematch' => ['sometimes', 'boolean'],
         ]);
         $search = $values['q'] ?? '';
         $page = (int) ($values['page'] ?? 1);
@@ -101,6 +102,8 @@ class MusicEntityController extends Controller
             'artwork' => config('artwork.enabled') && $type === 'album' ? Inertia::defer(fn () => $artwork->forGroup($item), 'artwork') : null,
             'artworkResult' => $request->session()->get('artwork_result'),
             'type' => $type,
+            'rematching' => $type === 'artist' && $request->boolean('rematch'),
+            'artistSnapshot' => $type === 'artist' ? $manual->artistSnapshot($item) : null,
             'item' => ['listen_id' => $item->id, 'artist_name' => $item->artist_name, 'release_name' => $item->release_name],
             'canMatch' => $item->artist_name !== 'Unknown artist' && trim($item->artist_name) !== ''
                 && ($type !== 'album' || trim($item->release_name ?? '') !== ''),
@@ -117,18 +120,20 @@ class MusicEntityController extends Controller
             'musicbrainzEnabled' => (bool) config('musicbrainz.enabled'),
             'artistScan' => $type === 'artist' ? DB::table('artist_recording_scans')
                 ->where('user_id', $request->user()->id)->where('entity_key', $manual->key('artist', $item))
-                ->orderByDesc('id')->first(['status', 'source', 'processed', 'matched', 'error']) : null,
+                ->orderByDesc('id')->first(['status', 'source', 'processed', 'matched', 'error', 'rematch_existing', 'unresolved', 'conflicts']) : null,
             'entityResult' => $request->session()->get('entity_result'),
         ]);
     }
 
-    public function matchMusicBrainz(Request $request, string $type, int $listen, MusicBrainzMatcher $matcher, ManualMusicEntityMatcher $manual, MusicBrainzApi $api): RedirectResponse
+    public function matchMusicBrainz(Request $request, string $type, int $listen, MusicBrainzMatcher $matcher, ManualMusicEntityMatcher $manual, MusicBrainzApi $api, CatalogRecordingGroups $groups): RedirectResponse
     {
         $item = $this->item($request, $type, $listen);
         $values = $request->validate([
             'mbid' => ['required', 'uuid'], 'name' => ['required', 'string', 'max:255'],
             'search_source' => ['nullable', Rule::in(['local', 'api'])],
             'scan_source' => ['nullable', Rule::in(['local', 'api'])],
+            'rematch_existing' => ['sometimes', 'boolean', Rule::prohibitedIf($type !== 'artist')],
+            'expected_artist_snapshot' => [Rule::requiredIf($request->boolean('rematch_existing')), 'nullable', 'string', 'size:64'],
         ]);
         $match = ($values['search_source'] ?? 'local') === 'api'
             ? $api->entity($type, $values['mbid'], $values['name'])
@@ -136,16 +141,26 @@ class MusicEntityController extends Controller
         if ($match === null) {
             throw ValidationException::withMessages(['mbid' => 'The selected item is unavailable in the local MusicBrainz database.']);
         }
-        DB::transaction(function () use ($manual, $request, $item, $type, $match, $values): void {
-            $manual->remember($request->user(), $item, $type, musicbrainz: $match);
+        DB::transaction(function () use ($manual, $request, $item, $type, $match, $values, $groups): void {
+            DB::table('users')->where('id', $request->user()->id)->lockForUpdate()->first();
+            $current = $this->item($request, $type, $item->id);
+            if ($type === 'artist' && isset($values['expected_artist_snapshot'])
+                && $manual->artistSnapshot($current) !== $values['expected_artist_snapshot']) {
+                throw ValidationException::withMessages(['mbid' => 'This artist group has changed. Reload it before choosing a replacement.']);
+            }
+            $rematchExisting = $type === 'artist' && $request->boolean('rematch_existing');
+            $snapshot = $rematchExisting ? $manual->recordingSnapshot($current, $groups) : null;
+            $manual->remember($request->user(), $current, $type, musicbrainz: $match);
             if ($type === 'artist') {
                 DB::table('artist_recording_scans')->where('user_id', $request->user()->id)
-                    ->where('entity_key', $manual->key('artist', $item))->whereIn('status', ['queued', 'running'])
+                    ->where('entity_key', $manual->key('artist', $current))->whereIn('status', ['queued', 'running'])
                     ->update(['status' => 'cancelled', 'updated_at' => now()]);
                 $scanId = DB::table('artist_recording_scans')->insertGetId([
-                    'user_id' => $request->user()->id, 'listen_id' => $item->id,
-                    'entity_key' => $manual->key('artist', $item), 'artist_mbid' => $match['mbid'],
+                    'user_id' => $request->user()->id, 'listen_id' => $current->id,
+                    'entity_key' => $manual->key('artist', $current), 'artist_mbid' => $match['mbid'],
                     'source' => $values['scan_source'] ?? 'local', 'status' => 'queued',
+                    'rematch_existing' => $rematchExisting,
+                    'recording_snapshot' => $snapshot === null ? null : json_encode($snapshot, JSON_THROW_ON_ERROR),
                     'created_at' => now(), 'updated_at' => now(),
                 ]);
                 ScanArtistRecordings::dispatch($scanId);
@@ -234,6 +249,13 @@ class MusicEntityController extends Controller
             ->orderBy('listens.track_name')->limit(100)->get();
         $listens = (clone $query)->select('listens.*')->orderByDesc('listens.listened_at')
             ->orderByDesc('listens.id')->paginate(25)->withQueryString();
+        $artistGroups = null;
+        if ($type === 'artist') {
+            $artistColumn = in_array(DB::connection()->getDriverName(), ['mysql', 'mariadb'], true)
+                ? 'BINARY listens.artist_name' : 'listens.artist_name';
+            $artistGroups = (clone $query)->selectRaw("{$artistColumn} as artist_name, MIN(listens.id) as listen_id, COUNT(*) as listen_count")
+                ->groupByRaw($artistColumn)->orderBy('artist_name')->paginate(25, ['*'], 'group_page')->withQueryString();
+        }
 
         return Inertia::render('music-entities/show', [
             'artworkEnabled' => (bool) config('artwork.enabled'),
@@ -241,6 +263,7 @@ class MusicEntityController extends Controller
             'entity' => ['mbid' => $entity->mbid, 'name' => $entity->name, 'type' => $type,
                 'nameSource' => $type === 'artist' ? $entity->name_source : null],
             'tracks' => $tracks,
+            'artistGroups' => $artistGroups,
             'listens' => $listens,
         ]);
     }

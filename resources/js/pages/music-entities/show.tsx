@@ -9,6 +9,7 @@ import { lookupName } from '@/routes/artists';
 import { index, show } from '@/routes/listens';
 import { index as albumsIndex } from '@/routes/albums';
 import { index as artistsIndex } from '@/routes/artists';
+import { manage } from '@/routes/music-entities';
 
 type Props = ArtworkProps & {
     entity: {
@@ -23,6 +24,14 @@ type Props = ArtworkProps & {
         track_name: string;
         artist_name: string;
     }[];
+    artistGroups: {
+        data: {
+            listen_id: number;
+            artist_name: string;
+            listen_count: number;
+        }[];
+        links: { url: string | null; label: string; active: boolean }[];
+    } | null;
     listens: {
         total: number;
         data: {
@@ -39,6 +48,7 @@ type Props = ArtworkProps & {
 export default function MusicEntityDetails({
     entity,
     tracks,
+    artistGroups,
     listens,
     artworkEnabled,
     artwork,
@@ -113,7 +123,97 @@ export default function MusicEntityDetails({
                     >
                         View on MusicBrainz
                     </a>
+                    {entity.type === 'artist' && (
+                        <div className="mt-3">
+                            <Button asChild variant="outline" size="sm">
+                                <a href="#artist-rematching">Re-match artist</a>
+                            </Button>
+                        </div>
+                    )}
                 </DetailHeader>
+                {entity.type === 'artist' && artistGroups && (
+                    <section
+                        id="artist-rematching"
+                        className="scroll-mt-6 rounded-xl border border-emerald-200 bg-emerald-50/40 p-5 sm:p-6 dark:border-emerald-900 dark:bg-emerald-950/15"
+                    >
+                        <h2 className="text-lg font-semibold">
+                            Re-match artist
+                        </h2>
+                        <p className="mt-2 text-sm text-muted-foreground">
+                            Choose an exact imported artist-credit group to
+                            correct. Only that group&apos;s saved artist choice
+                            is replaced; recording corrections can also update
+                            linked catalog tracks. You can also re-evaluate
+                            existing recordings; only safe, unambiguous
+                            replacements are applied.
+                        </p>
+                        <ul className="mt-3 divide-y">
+                            {artistGroups.data.map((group) => (
+                                <li
+                                    key={group.listen_id}
+                                    className="flex flex-wrap items-center justify-between gap-3 py-3 text-sm"
+                                >
+                                    <div>
+                                        <p className="font-medium">
+                                            {group.artist_name}
+                                        </p>
+                                        <p className="text-muted-foreground">
+                                            {group.listen_count.toLocaleString()}{' '}
+                                            listens linked to this artist
+                                        </p>
+                                    </div>
+                                    {group.artist_name.trim() &&
+                                        group.artist_name !==
+                                            'Unknown artist' && (
+                                            <Button
+                                                asChild
+                                                variant="outline"
+                                                size="sm"
+                                            >
+                                                <Link
+                                                    href={manage(
+                                                        {
+                                                            type: 'artist',
+                                                            listen: group.listen_id,
+                                                        },
+                                                        {
+                                                            query: {
+                                                                rematch: 1,
+                                                            },
+                                                        },
+                                                    )}
+                                                >
+                                                    Re-match this group
+                                                </Link>
+                                            </Button>
+                                        )}
+                                </li>
+                            ))}
+                        </ul>
+                        <nav
+                            aria-label="Artist-credit group pages"
+                            className="mt-3 flex flex-wrap gap-3 text-sm"
+                        >
+                            {artistGroups.links.map((link, index) =>
+                                link.url ? (
+                                    <Link
+                                        key={index}
+                                        href={link.url}
+                                        className={
+                                            link.active
+                                                ? 'font-bold'
+                                                : 'underline'
+                                        }
+                                    >
+                                        {link.label
+                                            .replace(/&laquo;|&raquo;/g, '')
+                                            .trim()}
+                                    </Link>
+                                ) : null,
+                            )}
+                        </nav>
+                    </section>
+                )}
                 <section className="rounded-xl border bg-card p-5 shadow-sm sm:p-6">
                     <h2 className="text-lg font-semibold">Related tracks</h2>
                     <p className="mt-1 text-sm text-muted-foreground">

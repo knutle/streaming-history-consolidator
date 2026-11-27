@@ -202,22 +202,36 @@ class MusicBrainzMatcher
     /**
      * @return array{recording_mbid: string, artist_name: string, artist_mbids: list<string>, release_mbid: ?string}|null
      */
-    public function match(string $track, string $artist, string $album, ?bool &$ambiguous = null): ?array
+    public function match(string $track, string $artist, string $album, ?bool &$ambiguous = null, ?string $artistMbid = null): ?array
     {
         $ambiguous = false;
-        if (! config('musicbrainz.enabled') || ($artist === '' && $album === '')) {
+        if (! config('musicbrainz.enabled') || ($artist === '' && $album === '' && $artistMbid === null)) {
             return null;
         }
 
         $db = DB::connection('musicbrainz');
         if (config('musicbrainz.format') === 'canonical' && $db->getDriverName() === 'sqlite') {
-            return $this->matchCanonical($track, $artist, $album, $ambiguous);
+            return $this->matchCanonical($track, $artist, $album, $ambiguous, $artistMbid);
         }
 
         $query = $db->table('recording')
             ->join('artist_credit', 'recording.artist_credit', '=', 'artist_credit.id')
             ->where('recording.name', $track)
             ->select('recording.id', 'recording.gid', 'artist_credit.id as artist_credit_id', 'artist_credit.name as artist_name');
+
+        if ($artistMbid !== null) {
+            $query->whereExists(function ($query) use ($artistMbid): void {
+                $query->selectRaw('1')->from('artist_credit_name')
+                    ->join('artist', 'artist.id', '=', 'artist_credit_name.artist')
+                    ->whereColumn('artist_credit_name.artist_credit', 'recording.artist_credit')
+                    ->where('artist.gid', $artistMbid)
+                    ->whereNotExists(function ($query): void {
+                        $query->selectRaw('1')->from('artist_credit_name as other_credit')
+                            ->whereColumn('other_credit.artist_credit', 'artist_credit_name.artist_credit')
+                            ->whereColumn('other_credit.position', '!=', 'artist_credit_name.position');
+                    });
+            });
+        }
 
         if ($album !== '') {
             $query->whereExists(function ($query) use ($album) {
@@ -280,10 +294,13 @@ class MusicBrainzMatcher
     /**
      * @return array{recording_mbid: string, artist_name: string, artist_mbids: list<string>, release_mbid: ?string}|null
      */
-    private function matchCanonical(string $track, string $artist, string $album, bool &$ambiguous): ?array
+    private function matchCanonical(string $track, string $artist, string $album, bool &$ambiguous, ?string $artistMbid = null): ?array
     {
         $query = DB::connection('musicbrainz')->table('canonical_recordings')
             ->where('recording_name', $track);
+        if ($artistMbid !== null) {
+            $query->where('artist_mbids', $artistMbid);
+        }
         if ($album !== '') {
             $query->where('release_name', $album);
         }
